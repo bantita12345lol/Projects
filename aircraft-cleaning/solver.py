@@ -23,7 +23,8 @@ Constraints
     (5) เชื่อมเวลาเสร็จกับ Cmax        Cmax >= E_j
     (6) ไม่เกิน Time Limit             Cmax <= T    (เปิด/ปิดได้)
     (7) งานที่ Block กันทำพร้อมกันไม่ได้
-    (8) x in {0,1}, Cmax in Z>=0
+    (8) S5: DEI1 เริ่มที่ t = 0
+    (9) x in {0,1}, Cmax in Z>=0
 """
 
 from __future__ import annotations
@@ -143,6 +144,13 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
     for (j, k) in data.P:
         if j in tasks and k in tasks:
             model.Add(end_expr[j] <= start_expr[k])
+
+    # ---- Scenario S5: De-icing เริ่มทันทีที่นาที 0 ----------------------
+    # DEICE1 เป็นพนักงานเฉพาะงาน DEI1 อยู่แล้วจาก capability matrix
+    # จึงกำหนดเวลาเริ่มของ DEI1 = 0 เพื่อให้การฉีด De-icing ทำคู่ขนานกับ
+    # งาน Cleaning/ground-service ตั้งแต่เริ่ม turnaround ได้โดยตรง
+    if data.scenario == "S5" and "DEI1" in tasks:
+        model.Add(start_expr["DEI1"] == 0)
 
     # ---- Constraint (7) งานที่ Block กัน ------------------------------
     for (j, k) in data.B:
