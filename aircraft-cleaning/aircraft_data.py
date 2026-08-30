@@ -416,7 +416,7 @@ SCENARIOS = {
     "S2": "Zone-based - แบ่งพนักงานตามหน่วยพื้นที่",
     "S3": "Trash First - เก็บขยะทุกหน่วยพื้นที่เสร็จก่อนดูดฝุ่น",
     "S4": "Zone-based + Trash First",
-    "S5": "De-icing + Zone-based + Trash First",
+    "S5": "De-icing at minute 0 + Zone-based + Trash First",
 }
 
 SERVICE_ZONES = ("LAV", "GAL", "CREW", "CHECK", "DEICE")
