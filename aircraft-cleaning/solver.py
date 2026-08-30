@@ -23,8 +23,9 @@ Constraints
     (5) เชื่อมเวลาเสร็จกับ Cmax        Cmax >= E_j
     (6) ไม่เกิน Time Limit             Cmax <= T    (เปิด/ปิดได้)
     (7) งานที่ Block กันทำพร้อมกันไม่ได้
-    (8) S5: DEI1 เริ่มที่ t = 0
-    (9) x in {0,1}, Cmax in Z>=0
+    (8) ภาระงาน LAV + GAL ต่อพนักงาน <= 25 นาที
+    (9) S5: DEI1 เริ่มที่ t = 0
+    (10) x in {0,1}, Cmax in Z>=0
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from typing import Dict, List, Tuple
 import pandas as pd
 from ortools.sat.python import cp_model
 
-from aircraft_data import Task
+from aircraft_data import SERVICE_TASK_KINDS, SERVICE_WORKLOAD_LIMIT, Task
 
 
 @dataclass
@@ -139,6 +140,20 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
             ]
             if len(active) > 1:
                 model.AddAtMostOne(active)
+
+    # ---- Constraint (8) ภาระงานห้องน้ำ + ห้องครัวต่อคน <= 25 นาที ----
+    # นับจากผลรวม duration ของงาน LAV/GAL ที่พนักงานคนนั้นได้รับมอบหมาย
+    # หาก service workload รวมเกิน 25 นาที Solver จำเป็นต้องกระจายไปคนเพิ่ม
+    for i in I:
+        service_load_terms = [
+            tasks[j].duration * x[(i, j, t)]
+            for j in J
+            if tasks[j].kind in SERVICE_TASK_KINDS
+            for t in H[j]
+            if (i, j, t) in x
+        ]
+        if service_load_terms:
+            model.Add(sum(service_load_terms) <= SERVICE_WORKLOAD_LIMIT)
 
     # ---- Constraint (4) ลำดับก่อน-หลัง --------------------------------
     for (j, k) in data.P:
