@@ -134,8 +134,10 @@ KIND_COLORS = {
 # Display helpers
 # ==================================================================
 def worker_display_name(worker_id: str) -> str:
-    """Convert worker code M1 into a readable worker label."""
+    """Convert internal worker IDs into readable dashboard labels."""
     worker_id = str(worker_id).strip()
+    if worker_id == "DEICE1":
+        return "DEICE1 — พนักงาน De-icing"
     if worker_id.startswith("M") and worker_id[1:].isdigit():
         return f"{worker_id} — พนักงานคนที่ {int(worker_id[1:])}"
     return worker_id
@@ -234,9 +236,17 @@ def refresh_task_labels(df: pd.DataFrame, aircraft_name: str) -> pd.DataFrame:
 
 
 def skill_matrix_df(
-    workers: list[str], tasks: list[Task], zone_based: bool
+    workers: list[str],
+    tasks: list[Task],
+    zone_based: bool,
+    dedicated_deicing_worker: str | None = None,
 ) -> pd.DataFrame:
-    a = build_capability(workers, tasks, zone_based=zone_based)
+    a = build_capability(
+        workers,
+        tasks,
+        zone_based=zone_based,
+        dedicated_deicing_worker=dedicated_deicing_worker,
+    )
     data = {"พนักงาน": workers}
     for t in tasks:
         data[t.id] = [bool(a[(i, t.id)]) for i in workers]
@@ -249,6 +259,29 @@ def df_to_capability(df: pd.DataFrame, tasks: list[Task]) -> dict:
         worker = str(r["พนักงาน"])
         for t in tasks:
             a[(worker, t.id)] = 1 if bool(r.get(t.id, True)) else 0
+    return a
+
+
+def enforce_dedicated_deicing_worker(
+    a: dict,
+    workers: list[str],
+    tasks: list[Task],
+    dedicated_worker: str | None,
+) -> dict:
+    """
+    บังคับกฎ S5 หลังอ่าน Skill Matrix จากหน้าเว็บ:
+    DEICE1 ทำได้เฉพาะ DEI1/งานประเภท DEI และ Cleaner คนอื่นทำ DEI ไม่ได้
+    เพื่อไม่ให้ผู้ใช้เผลอแก้ checkbox แล้วทำลายเงื่อนไขของ Scenario S5
+    """
+    if dedicated_worker is None:
+        return a
+
+    for i in workers:
+        for t in tasks:
+            if i == dedicated_worker:
+                a[(i, t.id)] = 1 if t.kind == "DEI" else 0
+            elif t.kind == "DEI":
+                a[(i, t.id)] = 0
     return a
 
 
@@ -586,7 +619,7 @@ max_seconds = st.sidebar.slider(
 )
 
 zone_based = scenario in ("S2", "S4", "S5")
-trash_first = scenario in ("S3", "S4")
+trash_first = scenario in ("S3", "S4", "S5")
 include_deicing = scenario == "S5"
 
 
@@ -649,7 +682,10 @@ st.markdown(
 h1, h2, h3, h4 = st.columns([1.1, 1.2, 1.1, 1.1])
 h1.metric("Aircraft", aircraft)
 h2.metric("Cleaning policy", cleaning_type.replace(" - ", "\n"))
-h3.metric("Workforce", f"{int(n_workers)} workers")
+if include_deicing:
+    h3.metric("Workforce", f"{int(n_workers) + 1} total")
+else:
+    h3.metric("Workforce", f"{int(n_workers)} workers")
 h4.metric("Turnaround target", f"{int(T)} min")
 
 st.caption(
@@ -659,9 +695,9 @@ st.caption(
 
 if include_deicing:
     st.info(
-        "S5 active: ระบบเพิ่มงาน Aircraft De-icing Spray (DEI1) ใน Task Set "
-        "· ใช้ Zone-based · Trash First เฉพาะภายในแต่ละ Zone (ไม่รอ Zone อื่น) "
-        "· และกำหนดให้ De-icing เป็นขั้นตอนท้ายหลังงาน Cleaning/ground-service อื่นเสร็จ"
+        f"S5 active: ใช้พนักงาน Cleaning {int(n_workers)} คน + เพิ่ม DEICE1 อีก 1 คน "
+        "สำหรับ Aircraft De-icing Spray (DEI1) โดยเฉพาะ พนักงาน DEICE1 ทำงานได้เพียง DEI1 งานเดียว "
+        "และ Cleaner คนอื่นไม่สามารถทำ DEI1 ได้"
     )
 
 
@@ -717,7 +753,8 @@ with tab_setup:
     tasks = df_to_tasks(tasks_df)
 
     total_work = sum(t.duration for t in tasks)
-    lower_bound = -(-total_work // max(1, int(n_workers))) if tasks else 0
+    total_worker_count = int(n_workers) + (1 if include_deicing else 0)
+    lower_bound = -(-total_work // max(1, total_worker_count)) if tasks else 0
 
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("Active tasks", len(tasks))
@@ -731,11 +768,23 @@ with tab_setup:
         "✓ = พนักงานสามารถทำงานนั้นได้ · Scenario S2/S4/S5 จะสร้างข้อจำกัดแบบ Zone-based อัตโนมัติ"
     )
 
-    workers = build_workers(int(n_workers))
-    skill_key = f"{signature}|{n_workers}|{zone_based}|{len(tasks)}|{','.join(t.id for t in tasks)}"
+    dedicated_deicing_worker = "DEICE1" if include_deicing else None
+    workers = build_workers(
+        int(n_workers),
+        add_deicing_worker=include_deicing,
+    )
+    skill_key = (
+        f"{signature}|{n_workers}|{zone_based}|dedicated={dedicated_deicing_worker}|"
+        f"{len(tasks)}|{','.join(t.id for t in tasks)}"
+    )
     if st.session_state.get("skill_key") != skill_key:
         st.session_state["skill_key"] = skill_key
-        st.session_state["skill_df"] = skill_matrix_df(workers, tasks, zone_based)
+        st.session_state["skill_df"] = skill_matrix_df(
+            workers,
+            tasks,
+            zone_based,
+            dedicated_deicing_worker=dedicated_deicing_worker,
+        )
 
     skill_df = st.data_editor(
         st.session_state["skill_df"],
@@ -758,6 +807,12 @@ with tab_setup:
             st.error("ยังไม่มีงานในรายการ")
         else:
             a = df_to_capability(skill_df, tasks)
+            a = enforce_dedicated_deicing_worker(
+                a,
+                workers,
+                tasks,
+                dedicated_deicing_worker,
+            )
             data = ProblemData(
                 aircraft=aircraft,
                 workers=workers,
@@ -966,7 +1021,6 @@ with tab_compare:
 
     if st.button("▶ Run Scenario Comparison", use_container_width=True):
         base_tasks = df_to_tasks(st.session_state["tasks_df"])
-        workers = build_workers(int(n_workers))
 
         def tasks_for_scenario(s: str) -> list[Task]:
             """
@@ -994,14 +1048,27 @@ with tab_compare:
         def build_fn(s: str) -> ProblemData:
             scenario_tasks = tasks_for_scenario(s)
             zb = s in ("S2", "S4", "S5")
-            tf = s in ("S3", "S4")
+            tf = s in ("S3", "S4", "S5")
             deice_last = s == "S5"
+
+            # S5 เพิ่มพนักงาน De-icing อีก 1 คน นอกเหนือจาก Cleaning workforce
+            scenario_workers = build_workers(
+                int(n_workers),
+                add_deicing_worker=(s == "S5"),
+            )
+            dedicated_worker = "DEICE1" if s == "S5" else None
+
             return ProblemData(
                 aircraft=aircraft,
-                workers=workers,
+                workers=scenario_workers,
                 tasks=scenario_tasks,
                 T=int(T),
-                a=build_capability(workers, scenario_tasks, zone_based=zb),
+                a=build_capability(
+                    scenario_workers,
+                    scenario_tasks,
+                    zone_based=zb,
+                    dedicated_deicing_worker=dedicated_worker,
+                ),
                 P=build_precedence(
                     scenario_tasks,
                     trash_first_global=tf,
@@ -1105,7 +1172,7 @@ $$\min\; C_{\max}$$
     st.caption(
         "Weather factor γ modifies task duration. Airport/operational policies are represented by "
         "capability parameter aᵢⱼ, precedence set P, blocking set B and Scenario selection. "
-        "Scenario S5 additionally introduces DEI1 (Aircraft De-icing Spray) as a turnaround task."
+        "Scenario S5 additionally introduces DEI1 (Aircraft De-icing Spray) and one dedicated De-icing worker (DEICE1)."
     )
 
     st.divider()
