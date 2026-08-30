@@ -14,8 +14,9 @@ aircraft_data.py
     หลักเกณฑ์ที่ใช้ประมาณมีดังนี้
 
     (1) จำนวนที่นั่ง ใช้ค่าผังมาตรฐานสองชั้นโดยสารที่ผู้ผลิตระบุ
-    (2) การแบ่ง Work Unit ใช้หลักการแบ่งตามชั้นโดยสารและตำแหน่งประตูทางออก
-        อากาศยานลำตัวแคบขึ้นไปแบ่งเป็น 3 หน่วย และ A380 แบ่งเป็น 4 หน่วยตามชั้นดาดฟ้า
+    (2) การแบ่ง Work Unit คงจำนวน Zone ตามโครงสร้างเดิม แต่กระจายจำนวนที่นั่ง
+        ในแต่ละ Zone ให้เท่ากันหรือใกล้เคียงกันที่สุด (แตกต่างกันไม่เกิน 1 ที่นั่ง)
+        เพื่อให้ภาระงานพื้นฐานของแต่ละ Work Unit สมดุลสำหรับการทดลองเชิง IE
     (3) จำนวนห้องน้ำ ประมาณจากอัตราส่วนมาตรฐานอุตสาหกรรม 1 ห้องต่อผู้โดยสาร 35-50 คน
     (4) จำนวนตำแหน่งครัว ประมาณจากตำแหน่งประตูหลักของอากาศยานแต่ละแบบ
     (5) อากาศยาน A320-200 ใช้ข้อมูลจากผังห้องโดยสารจริงของสายการบิน
@@ -37,23 +38,23 @@ AIRCRAFT_LIBRARY: Dict[str, dict] = {
         "seats": 70,
         "zones": [("Z1", "Economy Front", 35), ("Z2", "Economy Rear", 35)],
         "n_lav": 1, "n_gal": 1,
-        "source": "ค่าประมาณ แบ่ง 2 หน่วยตามความยาวห้องโดยสาร",
+        "source": "ค่าประมาณ แบ่ง 2 Work Units แบบสมดุล 35/35 ที่นั่ง",
     },
     "CRJ900": {
         "category": "Regional Aircraft",
         "seats": 90,
         "zones": [("Z1", "Economy Front", 45), ("Z2", "Economy Rear", 45)],
         "n_lav": 1, "n_gal": 1,
-        "source": "ค่าประมาณ แบ่ง 2 หน่วยตามความยาวห้องโดยสาร",
+        "source": "ค่าประมาณ แบ่ง 2 Work Units แบบสมดุล 45/45 ที่นั่ง",
     },
     "A320-200": {
         "category": "Narrow-body Aircraft",
         "seats": 156,
-        "zones": [("Z1", "Business Class", 12),
-                  ("Z2", "Economy Front", 72),
-                  ("Z3", "Economy Rear", 72)],
+        "zones": [("Z1", "Business Class", 52),
+                  ("Z2", "Economy Front", 52),
+                  ("Z3", "Economy Rear", 52)],
         "n_lav": 3, "n_gal": 2,
-        "source": "ผังห้องโดยสารจริง ชั้นธุรกิจ 12 ชั้นประหยัด 144 ห้องน้ำ 3",
+        "source": "ปรับเป็น 3 Work Units แบบสมดุล 52/52/52 ที่นั่ง สำหรับการทดลอง IE",
     },
     "B737-800": {
         "category": "Narrow-body Aircraft",
@@ -62,53 +63,53 @@ AIRCRAFT_LIBRARY: Dict[str, dict] = {
                   ("Z2", "Economy Middle", 63),
                   ("Z3", "Economy Rear", 63)],
         "n_lav": 3, "n_gal": 2,
-        "source": "ค่าประมาณ ผังชั้นเดียว 189 ที่นั่ง แบ่งสามส่วนเท่ากัน",
+        "source": "ค่าประมาณ แบ่ง 3 Work Units แบบสมดุล 63/63/63 ที่นั่ง",
     },
     "A330-300": {
         "category": "Wide-body Aircraft",
         "seats": 305,
-        "zones": [("Z1", "Business Class", 42),
-                  ("Z2", "Economy Front", 132),
-                  ("Z3", "Economy Rear", 131)],
+        "zones": [("Z1", "Business Class", 102),
+                  ("Z2", "Economy Front", 102),
+                  ("Z3", "Economy Rear", 101)],
         "n_lav": 8, "n_gal": 4,
-        "source": "ค่าประมาณ สองชั้นโดยสาร ห้องน้ำตามอัตรา 1 ต่อ 40 ที่นั่ง",
+        "source": "ค่าประมาณ แบ่ง 3 Work Units แบบสมดุล 102/102/101 ที่นั่ง",
     },
     "B787-9": {
         "category": "Wide-body Aircraft",
         "seats": 298,
-        "zones": [("Z1", "Business Class", 30),
-                  ("Z2", "Economy Front", 134),
-                  ("Z3", "Economy Rear", 134)],
+        "zones": [("Z1", "Business Class", 100),
+                  ("Z2", "Economy Front", 99),
+                  ("Z3", "Economy Rear", 99)],
         "n_lav": 7, "n_gal": 4,
-        "source": "ค่าประมาณ สองชั้นโดยสาร ห้องน้ำตามอัตรา 1 ต่อ 43 ที่นั่ง",
+        "source": "ค่าประมาณ แบ่ง 3 Work Units แบบสมดุล 100/99/99 ที่นั่ง",
     },
     "A350-900": {
         "category": "Large Aircraft",
         "seats": 321,
-        "zones": [("Z1", "Business Class", 32),
-                  ("Z2", "Economy Front", 145),
-                  ("Z3", "Economy Rear", 144)],
+        "zones": [("Z1", "Business Class", 107),
+                  ("Z2", "Economy Front", 107),
+                  ("Z3", "Economy Rear", 107)],
         "n_lav": 8, "n_gal": 4,
-        "source": "ค่าประมาณ สองชั้นโดยสาร ห้องน้ำตามอัตรา 1 ต่อ 40 ที่นั่ง",
+        "source": "ค่าประมาณ แบ่ง 3 Work Units แบบสมดุล 107/107/107 ที่นั่ง",
     },
     "B777-300ER": {
         "category": "Large Aircraft",
         "seats": 348,
-        "zones": [("Z1", "Business Class", 42),
-                  ("Z2", "Economy Front", 153),
-                  ("Z3", "Economy Rear", 153)],
+        "zones": [("Z1", "Business Class", 116),
+                  ("Z2", "Economy Front", 116),
+                  ("Z3", "Economy Rear", 116)],
         "n_lav": 10, "n_gal": 5,
-        "source": "ค่าประมาณ สองชั้นโดยสาร ห้องน้ำตามอัตรา 1 ต่อ 35 ที่นั่ง",
+        "source": "ค่าประมาณ แบ่ง 3 Work Units แบบสมดุล 116/116/116 ที่นั่ง",
     },
     "A380-800": {
         "category": "Very Large Aircraft",
         "seats": 507,
-        "zones": [("Z1", "Business Upper Deck", 60),
-                  ("Z2", "Economy Upper Deck", 87),
-                  ("Z3", "Economy Main Front", 180),
-                  ("Z4", "Economy Main Rear", 180)],
+        "zones": [("Z1", "Business Upper Deck", 127),
+                  ("Z2", "Economy Upper Deck", 127),
+                  ("Z3", "Economy Main Front", 127),
+                  ("Z4", "Economy Main Rear", 126)],
         "n_lav": 14, "n_gal": 6,
-        "source": "ค่าประมาณ สองชั้นดาดฟ้า แบ่ง 4 หน่วยตามชั้นและตำแหน่งประตู",
+        "source": "ค่าประมาณ แบ่ง 4 Work Units แบบสมดุล 127/127/127/126 ที่นั่ง",
     },
 }
 
@@ -427,9 +428,12 @@ def build_workers(n_workers: int,
     """
     สร้างรายชื่อพนักงาน Cleaning M1..Mn
 
-    สำหรับ Scenario S5 หาก add_deicing_worker=True จะเพิ่ม DEICE1 อีก 1 คน
-    ซึ่งเป็นพนักงานเฉพาะทางสำหรับงาน Aircraft De-icing Spray เท่านั้น
-    และไม่นับรวมอยู่ในค่า n_workers ที่ผู้ใช้ระบุบน Sidebar
+    ฟังก์ชันนี้รับ n_workers เป็นจำนวนพนักงาน Cleaning ที่ต้องสร้าง (M1..Mn)
+    หาก add_deicing_worker=True จะเพิ่ม DEICE1 อีก 1 คน ซึ่งทำเฉพาะงาน
+    Aircraft De-icing Spray เท่านั้น
+
+    หมายเหตุ: ใน app.py ของ Scenario S5 ค่า m บน Sidebar หมายถึงจำนวนพนักงานรวม
+    ดังนั้น app.py จะส่ง n_workers = m - 1 เข้ามาที่ฟังก์ชันนี้ แล้วจึงเพิ่ม DEICE1
     """
     workers = [f"M{i + 1}" for i in range(n_workers)]
     if add_deicing_worker:
