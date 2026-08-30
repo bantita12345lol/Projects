@@ -338,6 +338,13 @@ def build_precedence(tasks: List[Task],
 
     งานตรวจสอบซ้ำ RC ต้องทำหลังงานห้องน้ำและครัวเสร็จทั้งหมด
 
+    หมายเหตุเรื่อง Trash First
+    - ลำดับ C1 -> C2 ภายใน Zone ถูกสร้างไว้โดย ZONE_TASK_ORDER อยู่แล้ว
+      ดังนั้นแต่ละ Zone สามารถเก็บขยะแล้วดูดฝุ่นต่อได้ทันทีโดยไม่ต้องรอ Zone อื่น
+    - trash_first_global=True ใช้เฉพาะกรณีที่ต้องการให้เก็บขยะทุก Zone
+      เสร็จก่อนเริ่ม Vacuum ใด ๆ (เช่น S3/S4)
+    - S5 ใช้ Zone-local Trash First จึงส่ง trash_first_global=False
+
     เมื่อ deicing_last_global=True (Scenario S5) จะกำหนดให้งาน DEI1
     เริ่มได้หลังงาน Cleaning/ground-service อื่นทั้งหมดในแบบจำลองเสร็จแล้ว
     เพื่อแทนการ De-icing ช่วงท้ายของ turnaround ก่อนออกเดินทาง
@@ -416,7 +423,7 @@ SCENARIOS = {
     "S2": "Zone-based - แบ่งพนักงานตามหน่วยพื้นที่",
     "S3": "Trash First - เก็บขยะทุกหน่วยพื้นที่เสร็จก่อนดูดฝุ่น",
     "S4": "Zone-based + Trash First",
-    "S5": "De-icing + Zone-based + Trash First",
+    "S5": "De-icing + Zone-based + Zone-local Trash First",
 }
 
 SERVICE_ZONES = ("LAV", "GAL", "CREW", "CHECK", "DEICE")
