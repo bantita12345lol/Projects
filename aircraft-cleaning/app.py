@@ -586,7 +586,7 @@ max_seconds = st.sidebar.slider(
 )
 
 zone_based = scenario in ("S2", "S4", "S5")
-trash_first = scenario in ("S3", "S4", "S5")
+trash_first = scenario in ("S3", "S4")
 include_deicing = scenario == "S5"
 
 
@@ -660,7 +660,8 @@ st.caption(
 if include_deicing:
     st.info(
         "S5 active: ระบบเพิ่มงาน Aircraft De-icing Spray (DEI1) ใน Task Set "
-        "และกำหนดให้ De-icing เป็นขั้นตอนท้ายหลังงาน Cleaning/ground-service อื่นเสร็จ"
+        "· ใช้ Zone-based · Trash First เฉพาะภายในแต่ละ Zone (ไม่รอ Zone อื่น) "
+        "· และกำหนดให้ De-icing เป็นขั้นตอนท้ายหลังงาน Cleaning/ground-service อื่นเสร็จ"
     )
 
 
@@ -993,7 +994,7 @@ with tab_compare:
         def build_fn(s: str) -> ProblemData:
             scenario_tasks = tasks_for_scenario(s)
             zb = s in ("S2", "S4", "S5")
-            tf = s in ("S3", "S4", "S5")
+            tf = s in ("S3", "S4")
             deice_last = s == "S5"
             return ProblemData(
                 aircraft=aircraft,
