@@ -34,6 +34,9 @@ from aircraft_data import (
     TASK_KIND_LABEL,
     WEATHER_FACTOR,
     WEATHER_REASON,
+    SERVICE_TASK_KINDS,
+    SERVICE_WORKLOAD_LIMIT,
+    required_service_workers,
     Task,
     build_blocking,
     build_capability,
@@ -282,6 +285,36 @@ def enforce_dedicated_deicing_worker(
                 a[(i, t.id)] = 1 if t.kind == "DEI" else 0
             elif t.kind == "DEI":
                 a[(i, t.id)] = 0
+    return a
+
+
+def enforce_service_worker_rule(
+    a: dict,
+    workers: list[str],
+    tasks: list[Task],
+    zone_based: bool,
+    dedicated_worker: str | None = None,
+) -> dict:
+    """
+    บังคับ capability สำหรับงาน LAV/GAL ให้ตรงกับกฎ Service workload
+    แม้ Skill Matrix ใน session เดิมจะยังค้างจากเวอร์ชันก่อนหน้า
+
+    - พนักงาน 1 คนรับ LAV + GAL รวมกันได้ไม่เกิน SERVICE_WORKLOAD_LIMIT นาที
+    - ถ้างานรวมเกิน limit จะต้องมีพนักงาน Service เพิ่มตาม
+      ceil(total_service_work / limit)
+    - ใช้ build_capability เวอร์ชันล่าสุดเป็น source of truth สำหรับ LAV/GAL
+    """
+    auto_a = build_capability(
+        workers,
+        tasks,
+        zone_based=zone_based,
+        dedicated_deicing_worker=dedicated_worker,
+    )
+
+    for i in workers:
+        for t in tasks:
+            if t.kind in SERVICE_TASK_KINDS:
+                a[(i, t.id)] = auto_a.get((i, t.id), 0)
     return a
 
 
@@ -730,6 +763,24 @@ if include_deicing:
     )
 
 
+# แสดงกฎกำลังคนสำหรับ Lavatory + Galley
+_service_preview_tasks = build_tasks(
+    aircraft,
+    CLEANING_TYPES[cleaning_type],
+    weather,
+    include_deicing=include_deicing,
+)
+_service_total = sum(t.duration for t in _service_preview_tasks if t.kind in SERVICE_TASK_KINDS)
+_service_workers_required = required_service_workers(_service_preview_tasks)
+if _service_total > 0:
+    st.caption(
+        f"Service rule: LAV + GAL workload = {_service_total} นาที · "
+        f"สูงสุด {SERVICE_WORKLOAD_LIMIT} นาที/คน · "
+        f"ต้องใช้พนักงาน Service อย่างน้อย {_service_workers_required} คน"
+    )
+
+
+
 tab_setup, tab_result, tab_gantt, tab_compare, tab_model = st.tabs(
     [
         "01 · Input & Model Setup",
@@ -794,7 +845,8 @@ with tab_setup:
     st.divider()
     st.subheader("Worker Capability Matrix — aᵢⱼ")
     st.caption(
-        "✓ = พนักงานสามารถทำงานนั้นได้ · Scenario S2/S4/S5 จะสร้างข้อจำกัดแบบ Zone-based อัตโนมัติ"
+        "✓ = พนักงานสามารถทำงานนั้นได้ · Scenario S2/S4/S5 จะสร้างข้อจำกัดแบบ Zone-based อัตโนมัติ · "
+        f"LAV+GAL จำกัดไม่เกิน {SERVICE_WORKLOAD_LIMIT} นาที/คน"
     )
 
     dedicated_deicing_worker = "DEICE1" if include_deicing else None
@@ -803,7 +855,7 @@ with tab_setup:
         add_deicing_worker=include_deicing,
     )
     skill_key = (
-        f"{signature}|{n_workers}|{zone_based}|dedicated={dedicated_deicing_worker}|"
+        f"{signature}|{n_workers}|{zone_based}|dedicated={dedicated_deicing_worker}|service25_v2|"
         f"{len(tasks)}|{','.join(t.id for t in tasks)}"
     )
     if st.session_state.get("skill_key") != skill_key:
@@ -841,6 +893,13 @@ with tab_setup:
                 workers,
                 tasks,
                 dedicated_deicing_worker,
+            )
+            a = enforce_service_worker_rule(
+                a,
+                workers,
+                tasks,
+                zone_based=zone_based,
+                dedicated_worker=dedicated_deicing_worker,
             )
             data = ProblemData(
                 aircraft=aircraft,
