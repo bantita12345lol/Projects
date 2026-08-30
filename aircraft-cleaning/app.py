@@ -587,7 +587,27 @@ st.sidebar.caption(
 )
 
 st.sidebar.subheader("2) Workforce & Time")
-n_workers = st.sidebar.number_input("จำนวนพนักงาน (m)", 1, 30, 4, 1)
+
+# อ่าน Scenario ที่เลือกไว้จาก session_state ก่อนถึง widget Scenario ด้านล่าง
+# เพื่อให้ S5 แสดงจำนวนพนักงานรวมเริ่มต้นเป็น 5 คน
+# (Cleaner 4 คน + DEICE1 1 คน) โดยอัตโนมัติ
+scenario_hint = st.session_state.get("scenario_selector", "S1")
+is_s5_hint = scenario_hint == "S5"
+worker_widget_key = "n_workers_s5_total" if is_s5_hint else "n_workers_standard"
+default_worker_total = 5 if is_s5_hint else 4
+
+n_workers = st.sidebar.number_input(
+    "จำนวนพนักงานรวม (m)",
+    1,
+    30,
+    default_worker_total,
+    1,
+    key=worker_widget_key,
+    help=(
+        "จำนวนพนักงานรวมทั้งหมดของ Scenario นั้น ๆ · สำหรับ S5 จำนวนนี้รวม "
+        "พนักงาน DEICE1 แล้ว เช่น m=5 = Cleaner 4 คน + DEICE1 1 คน"
+    ),
+)
 T = st.sidebar.number_input("Turnaround Time T (นาที)", 5, 300, 30, 5)
 
 st.sidebar.subheader("3) Optimization Policy")
@@ -595,6 +615,7 @@ scenario = st.sidebar.selectbox(
     "Scenario",
     list(SCENARIOS.keys()),
     format_func=lambda s: f"{s} — {SCENARIOS[s]}",
+    key="scenario_selector",
 )
 objective_mode = st.sidebar.selectbox(
     "Objective",
@@ -621,6 +642,16 @@ max_seconds = st.sidebar.slider(
 zone_based = scenario in ("S2", "S4", "S5")
 trash_first = scenario in ("S3", "S4", "S5")
 include_deicing = scenario == "S5"
+
+# จำนวนพนักงานที่กรอกบน Sidebar = จำนวนพนักงานรวมทั้งหมด
+# S5 กันพนักงาน 1 คนไว้เป็น DEICE1 จึงเหลือ Cleaner = m - 1
+cleaning_worker_count = int(n_workers) - (1 if include_deicing else 0)
+
+if include_deicing and int(n_workers) < 2:
+    st.sidebar.error(
+        "S5 ต้องมีพนักงานรวมอย่างน้อย 2 คน: Cleaner อย่างน้อย 1 คน + DEICE1 1 คน"
+    )
+    st.stop()
 
 
 # ==================================================================
@@ -682,10 +713,7 @@ st.markdown(
 h1, h2, h3, h4 = st.columns([1.1, 1.2, 1.1, 1.1])
 h1.metric("Aircraft", aircraft)
 h2.metric("Cleaning policy", cleaning_type.replace(" - ", "\n"))
-if include_deicing:
-    h3.metric("Workforce", f"{int(n_workers) + 1} total")
-else:
-    h3.metric("Workforce", f"{int(n_workers)} workers")
+h3.metric("Workforce", f"{int(n_workers)} total")
 h4.metric("Turnaround target", f"{int(T)} min")
 
 st.caption(
@@ -695,9 +723,10 @@ st.caption(
 
 if include_deicing:
     st.info(
-        f"S5 active: ใช้พนักงาน Cleaning {int(n_workers)} คน + เพิ่ม DEICE1 อีก 1 คน "
-        "สำหรับ Aircraft De-icing Spray (DEI1) โดยเฉพาะ · DEI1 เริ่มที่นาที 0 · "
-        "พนักงาน DEICE1 ทำงานได้เพียง DEI1 งานเดียว และ Cleaner คนอื่นไม่สามารถทำ DEI1 ได้"
+        f"S5 active: จำนวนพนักงานรวม {int(n_workers)} คน = "
+        f"Cleaning {cleaning_worker_count} คน + DEICE1 1 คน · "
+        "DEICE1 ทำเฉพาะ Aircraft De-icing Spray (DEI1) และ DEI1 เริ่มที่นาที 0 · "
+        "Cleaner คนอื่นไม่สามารถทำ DEI1 ได้"
     )
 
 
@@ -753,7 +782,7 @@ with tab_setup:
     tasks = df_to_tasks(tasks_df)
 
     total_work = sum(t.duration for t in tasks)
-    total_worker_count = int(n_workers) + (1 if include_deicing else 0)
+    total_worker_count = int(n_workers)
     lower_bound = -(-total_work // max(1, total_worker_count)) if tasks else 0
 
     a1, a2, a3, a4 = st.columns(4)
@@ -770,7 +799,7 @@ with tab_setup:
 
     dedicated_deicing_worker = "DEICE1" if include_deicing else None
     workers = build_workers(
-        int(n_workers),
+        cleaning_worker_count,
         add_deicing_worker=include_deicing,
     )
     skill_key = (
@@ -1020,6 +1049,13 @@ with tab_compare:
     )
 
     if st.button("▶ Run Scenario Comparison", use_container_width=True):
+        if "S5" in picked and int(n_workers) < 2:
+            st.error(
+                "ไม่สามารถเปรียบเทียบ S5 เมื่อจำนวนพนักงานรวมต่ำกว่า 2 คน "
+                "เพราะ S5 ต้องมี Cleaner อย่างน้อย 1 คน + DEICE1 1 คน"
+            )
+            st.stop()
+
         base_tasks = df_to_tasks(st.session_state["tasks_df"])
 
         def tasks_for_scenario(s: str) -> list[Task]:
@@ -1051,9 +1087,11 @@ with tab_compare:
             tf = s in ("S3", "S4", "S5")
             deice_last = False
 
-            # S5 เพิ่มพนักงาน De-icing อีก 1 คน นอกเหนือจาก Cleaning workforce
+            # จำนวนพนักงาน m คือจำนวนรวมทั้งหมด
+            # S5 กัน 1 คนเป็น DEICE1 จึงเหลือ Cleaning workforce = m - 1
+            scenario_cleaning_workers = int(n_workers) - (1 if s == "S5" else 0)
             scenario_workers = build_workers(
-                int(n_workers),
+                scenario_cleaning_workers,
                 add_deicing_worker=(s == "S5"),
             )
             dedicated_worker = "DEICE1" if s == "S5" else None
@@ -1172,7 +1210,7 @@ $$\min\; C_{\max}$$
     st.caption(
         "Weather factor γ modifies task duration. Airport/operational policies are represented by "
         "capability parameter aᵢⱼ, precedence set P, blocking set B and Scenario selection. "
-        "Scenario S5 additionally introduces DEI1 (Aircraft De-icing Spray), fixes DEI1 to start at minute 0, and adds one dedicated De-icing worker (DEICE1)."
+        "Scenario S5 additionally introduces DEI1 (Aircraft De-icing Spray), fixes DEI1 to start at minute 0, and reserves one worker from the total workforce m as the dedicated De-icing worker (DEICE1)."
     )
 
     st.divider()
