@@ -338,13 +338,6 @@ def build_precedence(tasks: List[Task],
 
     งานตรวจสอบซ้ำ RC ต้องทำหลังงานห้องน้ำและครัวเสร็จทั้งหมด
 
-    หมายเหตุเรื่อง Trash First
-    - ลำดับ C1 -> C2 ภายใน Zone ถูกสร้างไว้โดย ZONE_TASK_ORDER อยู่แล้ว
-      ดังนั้นแต่ละ Zone สามารถเก็บขยะแล้วดูดฝุ่นต่อได้ทันทีโดยไม่ต้องรอ Zone อื่น
-    - trash_first_global=True ใช้เฉพาะกรณีที่ต้องการให้เก็บขยะทุก Zone
-      เสร็จก่อนเริ่ม Vacuum ใด ๆ (เช่น S3/S4)
-    - S5 ใช้ Zone-local Trash First จึงส่ง trash_first_global=False
-
     เมื่อ deicing_last_global=True (Scenario S5) จะกำหนดให้งาน DEI1
     เริ่มได้หลังงาน Cleaning/ground-service อื่นทั้งหมดในแบบจำลองเสร็จแล้ว
     เพื่อแทนการ De-icing ช่วงท้ายของ turnaround ก่อนออกเดินทาง
@@ -423,21 +416,72 @@ SCENARIOS = {
     "S2": "Zone-based - แบ่งพนักงานตามหน่วยพื้นที่",
     "S3": "Trash First - เก็บขยะทุกหน่วยพื้นที่เสร็จก่อนดูดฝุ่น",
     "S4": "Zone-based + Trash First",
-    "S5": "De-icing + Zone-based + Zone-local Trash First",
+    "S5": "De-icing + Zone-based + Trash First",
 }
 
 SERVICE_ZONES = ("LAV", "GAL", "CREW", "CHECK", "DEICE")
 
 
-def build_workers(n_workers: int) -> List[str]:
-    return [f"M{i + 1}" for i in range(n_workers)]
+def build_workers(n_workers: int,
+                  add_deicing_worker: bool = False) -> List[str]:
+    """
+    สร้างรายชื่อพนักงาน Cleaning M1..Mn
+
+    สำหรับ Scenario S5 หาก add_deicing_worker=True จะเพิ่ม DEICE1 อีก 1 คน
+    ซึ่งเป็นพนักงานเฉพาะทางสำหรับงาน Aircraft De-icing Spray เท่านั้น
+    และไม่นับรวมอยู่ในค่า n_workers ที่ผู้ใช้ระบุบน Sidebar
+    """
+    workers = [f"M{i + 1}" for i in range(n_workers)]
+    if add_deicing_worker:
+        workers.append("DEICE1")
+    return workers
 
 
 def build_capability(workers: List[str], tasks: List[Task],
-                     zone_based: bool = False) -> Dict[Tuple[str, str], int]:
-    """สร้าง a_ij โดย 1 หมายถึงทำได้ และ 0 หมายถึงทำไม่ได้"""
+                     zone_based: bool = False,
+                     dedicated_deicing_worker: str | None = None
+                     ) -> Dict[Tuple[str, str], int]:
+    """
+    สร้าง a_ij โดย 1 หมายถึงทำได้ และ 0 หมายถึงทำไม่ได้
+
+    dedicated_deicing_worker:
+        ใช้กับ Scenario S5 เพื่อกำหนดพนักงาน De-icing โดยเฉพาะ
+        - พนักงานคนนี้ทำได้เฉพาะงาน kind == "DEI"
+        - พนักงาน Cleaning คนอื่นทำงาน DEI ไม่ได้
+        - การแบ่ง Zone/Service ของพนักงาน Cleaning ยังคงใช้กฎเดิม
+    """
     a: Dict[Tuple[str, str], int] = {}
 
+    # --------------------------------------------------------------
+    # S5: แยก De-icing worker ออกจาก Cleaning workforce โดยสมบูรณ์
+    # --------------------------------------------------------------
+    if dedicated_deicing_worker is not None:
+        cleaning_workers = [i for i in workers if i != dedicated_deicing_worker]
+        cleaning_tasks = [t for t in tasks if t.kind != "DEI"]
+
+        # ใช้ logic เดิมสร้าง capability ของทีม Cleaning ก่อน
+        cleaning_a = build_capability(
+            cleaning_workers,
+            cleaning_tasks,
+            zone_based=zone_based,
+            dedicated_deicing_worker=None,
+        )
+
+        for i in workers:
+            for t in tasks:
+                if i == dedicated_deicing_worker:
+                    # DEICE1 ทำเพียงงาน De-icing เท่านั้น
+                    a[(i, t.id)] = 1 if t.kind == "DEI" else 0
+                elif t.kind == "DEI":
+                    # Cleaner ทุกคนห้ามทำ DEI1
+                    a[(i, t.id)] = 0
+                else:
+                    a[(i, t.id)] = cleaning_a.get((i, t.id), 0)
+        return a
+
+    # --------------------------------------------------------------
+    # Scenario ปกติ S1-S4: logic เดิม
+    # --------------------------------------------------------------
     if not zone_based:
         for i in workers:
             for t in tasks:
