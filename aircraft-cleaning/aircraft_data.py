@@ -130,6 +130,7 @@ TASK_KIND_LABEL = {
     "FD":  "Flight Deck Cleaning",      # 4.2.1 ห้องนักบิน
     "CR":  "Crew Cabin Cleaning",       # 4.2.1 ห้องพักลูกเรือ
     "RC":  "Final Recheck",             # 4.2.4 ตรวจสอบความสะอาดซ้ำ
+    "DEI": "Aircraft De-icing Spray",     # S5 งานฉีดน้ำยาละลายน้ำแข็งภายนอกอากาศยาน
 }
 
 SCOPE_MAPPING = [
@@ -145,6 +146,7 @@ SCOPE_MAPPING = [
     ("4.2.2", "ช่องเก็บสัมภาระเหนือศีรษะ", "OVH"),
     ("4.2.3", "การจัดเตรียมผ้าห่ม หมอน ชุดหูฟัง", "F"),
     ("4.2.4", "การตรวจสอบความสะอาดซ้ำ", "RC1, RC2"),
+    ("S5", "การฉีดน้ำยาละลายน้ำแข็งอากาศยาน (De-icing)", "DEI1"),
 ]
 
 CLEANING_TYPES: Dict[str, List[str]] = {
@@ -179,6 +181,21 @@ FIXED_DURATION = {
     "FD":  6,   # ห้องนักบิน
     "CR":  5,   # ห้องพักลูกเรือ
     "RC":  3,   # ตรวจสอบซ้ำ ต่อหนึ่งจุด
+}
+
+# ระยะเวลา De-icing เป็นสมมติฐานของตัวแบบสำหรับ Scenario S5
+# แยกตามขนาดอากาศยานเพื่อให้เครื่องบินขนาดใหญ่ใช้เวลามากขึ้น
+# ค่าเหล่านี้สามารถปรับภายหลังให้ตรงกับข้อมูลจริงของสนามบิน/ผู้ให้บริการได้
+DEICING_DURATION_BY_AIRCRAFT = {
+    "ATR72-600": 8,
+    "CRJ900": 8,
+    "A320-200": 10,
+    "B737-800": 10,
+    "A330-300": 15,
+    "B787-9": 15,
+    "A350-900": 16,
+    "B777-300ER": 18,
+    "A380-800": 25,
 }
 
 # ==================================================================
@@ -242,8 +259,14 @@ ZONE_TASK_ORDER = ["C1", "OVH", "D", "C2", "C3", "E", "F"]
 
 def build_tasks(aircraft: str,
                 cleaning_kinds: List[str] | None = None,
-                weather: str = DEFAULT_WEATHER) -> List[Task]:
-    """สร้างรายการงานทั้งหมดของอากาศยานที่เลือก ภายใต้สภาพอากาศที่กำหนด"""
+                weather: str = DEFAULT_WEATHER,
+                include_deicing: bool = False) -> List[Task]:
+    """
+    สร้างรายการงานทั้งหมดของอากาศยานที่เลือก ภายใต้สภาพอากาศที่กำหนด
+
+    include_deicing=True ใช้สำหรับ Scenario S5 และจะเพิ่มงาน DEI1
+    (Aircraft De-icing Spray) เป็นงานภายนอกอากาศยานหนึ่งงาน
+    """
     spec = AIRCRAFT_LIBRARY[aircraft]
     kinds = set(cleaning_kinds or CLEANING_TYPES[DEFAULT_CLEANING_TYPE])
     gamma = WEATHER_FACTOR.get(weather, 1.0)
@@ -286,6 +309,17 @@ def build_tasks(aircraft: str,
             tasks.append(Task("RC2", "RC", "CHECK",
                               "Recheck Galley", fixed_duration("RC", gamma)))
 
+    # Scenario S5: เพิ่มงานฉีด De-icing ภายนอกอากาศยาน
+    # ไม่คูณ weather gamma ซ้ำ เพราะงานนี้เป็นสถานการณ์พิเศษที่ถูกเพิ่มโดย Scenario เอง
+    if include_deicing:
+        tasks.append(Task(
+            "DEI1",
+            "DEI",
+            "DEICE",
+            "Aircraft De-icing Spray",
+            DEICING_DURATION_BY_AIRCRAFT.get(aircraft, 12),
+        ))
+
     return tasks
 
 
@@ -293,7 +327,8 @@ def build_tasks(aircraft: str,
 # 6) เซต P ลำดับก่อน-หลัง
 # ==================================================================
 def build_precedence(tasks: List[Task],
-                     trash_first_global: bool = False) -> List[Tuple[str, str]]:
+                     trash_first_global: bool = False,
+                     deicing_last_global: bool = False) -> List[Tuple[str, str]]:
     """
     ลำดับภายในหน่วยพื้นที่  C1 -> OVH -> D -> C2 -> C3 -> E -> F
 
@@ -302,6 +337,10 @@ def build_precedence(tasks: List[Task],
         ตามด้วยการจัดความเรียบร้อย งานพื้นผิวเพิ่มเติม และการจัดของผู้โดยสาร
 
     งานตรวจสอบซ้ำ RC ต้องทำหลังงานห้องน้ำและครัวเสร็จทั้งหมด
+
+    เมื่อ deicing_last_global=True (Scenario S5) จะกำหนดให้งาน DEI1
+    เริ่มได้หลังงาน Cleaning/ground-service อื่นทั้งหมดในแบบจำลองเสร็จแล้ว
+    เพื่อแทนการ De-icing ช่วงท้ายของ turnaround ก่อนออกเดินทาง
     """
     ids = {t.id for t in tasks}
     zones = sorted({t.zone for t in tasks if t.zone.startswith("Z")})
@@ -324,6 +363,12 @@ def build_precedence(tasks: List[Task],
         P.extend((t.id, "RC1") for t in tasks if t.kind == "LAV")
     if "RC2" in ids:
         P.extend((t.id, "RC2") for t in tasks if t.kind == "GAL")
+
+    # Scenario S5: De-icing เป็นขั้นตอนท้ายของ turnaround
+    if deicing_last_global and "DEI1" in ids:
+        for t in tasks:
+            if t.id != "DEI1" and (t.id, "DEI1") not in P:
+                P.append((t.id, "DEI1"))
 
     return P
 
@@ -371,9 +416,10 @@ SCENARIOS = {
     "S2": "Zone-based - แบ่งพนักงานตามหน่วยพื้นที่",
     "S3": "Trash First - เก็บขยะทุกหน่วยพื้นที่เสร็จก่อนดูดฝุ่น",
     "S4": "Zone-based + Trash First",
+    "S5": "De-icing + Zone-based + Trash First",
 }
 
-SERVICE_ZONES = ("LAV", "GAL", "CREW", "CHECK")
+SERVICE_ZONES = ("LAV", "GAL", "CREW", "CHECK", "DEICE")
 
 
 def build_workers(n_workers: int) -> List[str]:
