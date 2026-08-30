@@ -696,8 +696,8 @@ st.caption(
 if include_deicing:
     st.info(
         f"S5 active: ใช้พนักงาน Cleaning {int(n_workers)} คน + เพิ่ม DEICE1 อีก 1 คน "
-        "สำหรับ Aircraft De-icing Spray (DEI1) โดยเฉพาะ พนักงาน DEICE1 ทำงานได้เพียง DEI1 งานเดียว "
-        "และ Cleaner คนอื่นไม่สามารถทำ DEI1 ได้"
+        "สำหรับ Aircraft De-icing Spray (DEI1) โดยเฉพาะ · DEI1 เริ่มที่นาที 0 · "
+        "พนักงาน DEICE1 ทำงานได้เพียง DEI1 งานเดียว และ Cleaner คนอื่นไม่สามารถทำ DEI1 ได้"
     )
 
 
@@ -822,7 +822,7 @@ with tab_setup:
                 P=build_precedence(
                     tasks,
                     trash_first_global=trash_first,
-                    deicing_last_global=include_deicing,
+                    deicing_last_global=False,
                 ),
                 B=build_blocking(tasks) if use_blocking else [],
                 enforce_time_limit=enforce_T,
@@ -1049,7 +1049,7 @@ with tab_compare:
             scenario_tasks = tasks_for_scenario(s)
             zb = s in ("S2", "S4", "S5")
             tf = s in ("S3", "S4", "S5")
-            deice_last = s == "S5"
+            deice_last = False
 
             # S5 เพิ่มพนักงาน De-icing อีก 1 คน นอกเหนือจาก Cleaning workforce
             scenario_workers = build_workers(
@@ -1172,7 +1172,7 @@ $$\min\; C_{\max}$$
     st.caption(
         "Weather factor γ modifies task duration. Airport/operational policies are represented by "
         "capability parameter aᵢⱼ, precedence set P, blocking set B and Scenario selection. "
-        "Scenario S5 additionally introduces DEI1 (Aircraft De-icing Spray) and one dedicated De-icing worker (DEICE1)."
+        "Scenario S5 additionally introduces DEI1 (Aircraft De-icing Spray), fixes DEI1 to start at minute 0, and adds one dedicated De-icing worker (DEICE1)."
     )
 
     st.divider()
@@ -1185,7 +1185,7 @@ $$\min\; C_{\max}$$
         P = build_precedence(
             tasks_now,
             trash_first_global=trash_first,
-            deicing_last_global=include_deicing,
+            deicing_last_global=False,
         )
         p_display = pd.DataFrame([
             {
