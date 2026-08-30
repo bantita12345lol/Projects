@@ -239,11 +239,16 @@ ZONE_DURATION_COEFF = {
 # ปัดเป็นนาทีเต็มเพื่อให้สอดคล้องกับ time-indexed model ที่ใช้หน่วย 1 นาที
 FIXED_DURATION = {
     "LAV": 2,   # ~2 นาที/ห้องน้ำ (งานวิจัยรายงานประมาณ 115-120 วินาที)
-    "GAL": 2,   # ~2 นาที/ตำแหน่งครัว รวมเวลาเข้าพื้นที่/จัดเก็บ (100-149 วินาทีเป็นฐาน)
+    "GAL": 2,   # 2 นาที/ตำแหน่งครัว
     "FD":  2,   # ~2 นาที ห้องนักบิน รวมเวลาเข้าพื้นที่และตรวจความเรียบร้อย
     "CR":  3,   # ~3 นาที ห้องพักลูกเรือ
     "RC":  2,   # ~2 นาที ตรวจสอบความสะอาดซ้ำต่อจุด
 }
+
+# ข้อจำกัดภาระงานห้องน้ำ + ห้องครัวต่อพนักงาน 1 คน
+# พนักงานหนึ่งคนรับงาน LAV และ GAL รวมกันได้ไม่เกิน 25 นาที
+SERVICE_WORKLOAD_LIMIT = 25
+SERVICE_TASK_KINDS = ("LAV", "GAL")
 
 # ระยะเวลา Aircraft De-icing สำหรับ Scenario S5
 # เป็นค่ากลางเชิงแบบจำลอง ไม่ใช่เวลาตายตัวของทุกสนามบิน เพราะเวลาจริงขึ้นกับ
@@ -472,6 +477,26 @@ def build_blocking(tasks: List[Task]) -> List[Tuple[str, str]]:
     return B
 
 
+def service_workload_minutes(tasks: List[Task]) -> int:
+    """เวลางานห้องน้ำ + ห้องครัวรวมทั้งหมดของชุดงาน (นาที)."""
+    return sum(t.duration for t in tasks if t.kind in SERVICE_TASK_KINDS)
+
+
+def required_service_workers(tasks: List[Task],
+                             limit_per_worker: int = SERVICE_WORKLOAD_LIMIT) -> int:
+    """
+    จำนวนพนักงานขั้นต่ำสำหรับงาน Lavatory + Galley ภายใต้เงื่อนไข
+    ภาระงานรวมต่อคนไม่เกิน limit_per_worker นาที.
+
+    ตัวอย่าง: service workload = 46 นาที, limit = 25
+             -> ceil(46/25) = 2 คน
+    """
+    total = service_workload_minutes(tasks)
+    if total <= 0:
+        return 0
+    return max(1, math.ceil(total / max(1, limit_per_worker)))
+
+
 # ==================================================================
 # 8) เซต a_ij ความสามารถของพนักงาน และ Scenario
 # ==================================================================
@@ -515,7 +540,7 @@ def build_capability(workers: List[str], tasks: List[Task],
         ใช้กับ Scenario S5 เพื่อกำหนดพนักงาน De-icing โดยเฉพาะ
         - พนักงานคนนี้ทำได้เฉพาะงาน kind == "DEI"
         - พนักงาน Cleaning คนอื่นทำงาน DEI ไม่ได้
-        - การแบ่ง Zone/Service ของพนักงาน Cleaning ยังคงใช้กฎเดิม
+        - การแบ่ง Zone/Service ของพนักงาน Cleaning ใช้กฎ LAV+GAL ไม่เกิน 25 นาที/คน
     """
     a: Dict[Tuple[str, str], int] = {}
 
@@ -558,8 +583,23 @@ def build_capability(workers: List[str], tasks: List[Task],
     zones = sorted({t.zone for t in tasks if t.zone.startswith("Z")})
     has_service = any(t.zone in SERVICE_ZONES for t in tasks)
 
-    if len(workers) >= 3 and has_service:
-        cabin_workers, service_workers = workers[:-1], [workers[-1]]
+    # --------------------------------------------------------------
+    # กฎภาระงาน Service: LAV + GAL รวมกันไม่เกิน 25 นาที/คน
+    # ถ้างานรวมเกิน 25 นาที จะกันพนักงาน Service เพิ่มโดยอัตโนมัติ
+    # เช่น 46 นาที -> ต้องมีอย่างน้อย ceil(46/25) = 2 คน
+    # --------------------------------------------------------------
+    n_service_required = required_service_workers(tasks) if has_service else 0
+
+    if has_service and n_service_required > 0:
+        if len(workers) > n_service_required:
+            # กันพนักงานท้ายรายการตามจำนวนที่ต้องใช้สำหรับ LAV/GAL
+            service_workers = workers[-n_service_required:]
+            cabin_workers = workers[:-n_service_required]
+        else:
+            # ถ้ากำลังคนรวมมีน้อยมาก ให้ทุกคนมีสิทธิ์ทั้ง Cabin และ Service
+            # Solver จะยังคงบังคับ LAV+GAL <= 25 นาที/คน
+            service_workers = workers
+            cabin_workers = workers
     else:
         cabin_workers, service_workers = workers, workers
 
