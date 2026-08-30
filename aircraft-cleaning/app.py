@@ -126,6 +126,7 @@ KIND_COLORS = {
     "FD": "#BAB0AC",   # Flight Deck
     "CR": "#2F4B7C",   # Crew Cabin
     "RC": "#7A5195",   # Recheck
+    "DEI": "#00A6A6",  # Aircraft De-icing
 }
 
 
@@ -160,6 +161,7 @@ def zone_display_name(zone: str, aircraft_name: str) -> str:
         "GAL": "Galley Area",
         "CREW": "Crew / Flight Deck Area",
         "CHECK": "Final Inspection Area",
+        "DEICE": "Aircraft Exterior / De-icing Area",
     }
     return service_zone_names.get(zone, zone)
 
@@ -583,18 +585,24 @@ max_seconds = st.sidebar.slider(
     5,
 )
 
-zone_based = scenario in ("S2", "S4")
-trash_first = scenario in ("S3", "S4")
+zone_based = scenario in ("S2", "S4", "S5")
+trash_first = scenario in ("S3", "S4", "S5")
+include_deicing = scenario == "S5"
 
 
 # ==================================================================
 # Initialize / reset tasks when major inputs change
 # ==================================================================
-signature = f"{aircraft}|{cleaning_type}|{weather}"
+signature = f"{aircraft}|{cleaning_type}|{weather}|deicing={include_deicing}"
 if st.session_state.get("signature") != signature:
     st.session_state["signature"] = signature
     st.session_state["tasks_df"] = tasks_to_df(
-        build_tasks(aircraft, CLEANING_TYPES[cleaning_type], weather),
+        build_tasks(
+            aircraft,
+            CLEANING_TYPES[cleaning_type],
+            weather,
+            include_deicing=include_deicing,
+        ),
         aircraft,
     )
     st.session_state.pop("skill_df", None)
@@ -608,7 +616,12 @@ if st.sidebar.button(
     use_container_width=True,
 ):
     st.session_state["tasks_df"] = tasks_to_df(
-        build_tasks(aircraft, CLEANING_TYPES[cleaning_type], weather),
+        build_tasks(
+            aircraft,
+            CLEANING_TYPES[cleaning_type],
+            weather,
+            include_deicing=include_deicing,
+        ),
         aircraft,
     )
     st.session_state.pop("skill_df", None)
@@ -643,6 +656,12 @@ st.caption(
     f"Experimental condition: {SCENARIOS[scenario]} · Objective = {objective_mode} · "
     f"Weather = {weather} (γ={WEATHER_FACTOR[weather]:.2f})"
 )
+
+if include_deicing:
+    st.info(
+        "S5 active: ระบบเพิ่มงาน Aircraft De-icing Spray (DEI1) ใน Task Set "
+        "และกำหนดให้ De-icing เป็นขั้นตอนท้ายหลังงาน Cleaning/ground-service อื่นเสร็จ"
+    )
 
 
 tab_setup, tab_result, tab_gantt, tab_compare, tab_model = st.tabs(
@@ -708,7 +727,7 @@ with tab_setup:
     st.divider()
     st.subheader("Worker Capability Matrix — aᵢⱼ")
     st.caption(
-        "✓ = พนักงานสามารถทำงานนั้นได้ · Scenario S2/S4 จะสร้างข้อจำกัดแบบ Zone-based อัตโนมัติ"
+        "✓ = พนักงานสามารถทำงานนั้นได้ · Scenario S2/S4/S5 จะสร้างข้อจำกัดแบบ Zone-based อัตโนมัติ"
     )
 
     workers = build_workers(int(n_workers))
@@ -744,7 +763,11 @@ with tab_setup:
                 tasks=tasks,
                 T=int(T),
                 a=a,
-                P=build_precedence(tasks, trash_first_global=trash_first),
+                P=build_precedence(
+                    tasks,
+                    trash_first_global=trash_first,
+                    deicing_last_global=include_deicing,
+                ),
                 B=build_blocking(tasks) if use_blocking else [],
                 enforce_time_limit=enforce_T,
                 objective_mode=objective_mode,
@@ -930,7 +953,7 @@ with tab_compare:
     st.subheader("Scenario Analysis")
     st.caption(
         "เปรียบเทียบผลภายใต้ aircraft, task set, workforce, weather และ turnaround time ชุดเดียวกัน "
-        "โดยเปลี่ยนเฉพาะนโยบาย capability / precedence ของแต่ละ Scenario"
+        "โดยเปลี่ยนนโยบาย capability / precedence และใน S5 จะเพิ่มงาน Aircraft De-icing เข้ามาใน Task Set"
     )
 
     picked = st.multiselect(
@@ -941,20 +964,49 @@ with tab_compare:
     )
 
     if st.button("▶ Run Scenario Comparison", use_container_width=True):
-        tasks = df_to_tasks(st.session_state["tasks_df"])
+        base_tasks = df_to_tasks(st.session_state["tasks_df"])
         workers = build_workers(int(n_workers))
 
+        def tasks_for_scenario(s: str) -> list[Task]:
+            """
+            ใช้ Task ที่ผู้ใช้แก้ไขไว้เป็นฐาน
+            - S1-S4: ไม่รวมงาน De-icing
+            - S5: เพิ่ม DEI1 ถ้ายังไม่มี
+            """
+            normal_tasks = [t for t in base_tasks if t.kind != "DEI"]
+            if s != "S5":
+                return normal_tasks
+
+            existing_deicing = [t for t in base_tasks if t.kind == "DEI"]
+            if existing_deicing:
+                return normal_tasks + existing_deicing
+
+            default_s5_tasks = build_tasks(
+                aircraft,
+                CLEANING_TYPES[cleaning_type],
+                weather,
+                include_deicing=True,
+            )
+            deicing_tasks = [t for t in default_s5_tasks if t.kind == "DEI"]
+            return normal_tasks + deicing_tasks
+
         def build_fn(s: str) -> ProblemData:
-            zb = s in ("S2", "S4")
-            tf = s in ("S3", "S4")
+            scenario_tasks = tasks_for_scenario(s)
+            zb = s in ("S2", "S4", "S5")
+            tf = s in ("S3", "S4", "S5")
+            deice_last = s == "S5"
             return ProblemData(
                 aircraft=aircraft,
                 workers=workers,
-                tasks=tasks,
+                tasks=scenario_tasks,
                 T=int(T),
-                a=build_capability(workers, tasks, zone_based=zb),
-                P=build_precedence(tasks, trash_first_global=tf),
-                B=build_blocking(tasks) if use_blocking else [],
+                a=build_capability(workers, scenario_tasks, zone_based=zb),
+                P=build_precedence(
+                    scenario_tasks,
+                    trash_first_global=tf,
+                    deicing_last_global=deice_last,
+                ),
+                B=build_blocking(scenario_tasks) if use_blocking else [],
                 enforce_time_limit=enforce_T,
                 objective_mode=objective_mode,
                 scenario=s,
@@ -1051,7 +1103,8 @@ $$\min\; C_{\max}$$
     )
     st.caption(
         "Weather factor γ modifies task duration. Airport/operational policies are represented by "
-        "capability parameter aᵢⱼ, precedence set P, blocking set B and Scenario selection."
+        "capability parameter aᵢⱼ, precedence set P, blocking set B and Scenario selection. "
+        "Scenario S5 additionally introduces DEI1 (Aircraft De-icing Spray) as a turnaround task."
     )
 
     st.divider()
@@ -1061,7 +1114,11 @@ $$\min\; C_{\max}$$
     cA, cB = st.columns(2)
     with cA:
         st.markdown("#### Precedence Set P")
-        P = build_precedence(tasks_now, trash_first_global=trash_first)
+        P = build_precedence(
+            tasks_now,
+            trash_first_global=trash_first,
+            deicing_last_global=include_deicing,
+        )
         p_display = pd.DataFrame([
             {
                 "งานก่อน": lookup[j].name if j in lookup else j,
