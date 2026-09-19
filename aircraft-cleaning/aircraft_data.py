@@ -209,8 +209,8 @@ DEFAULT_CLEANING_TYPE = "Quick Transit - พื้นฐาน"
 #
 # งานในพื้นที่ที่นั่งใช้สูตร
 #       d_j = round(base + rate x seats_in_zone)
-# ค่าสัมประสิทธิ์ถูกปรับให้ Quick Transit ของ A320 (52 ที่นั่ง/Zone)
-# ใช้เวลาประมาณ 6 นาทีต่อ Zone เมื่อทำ C1 -> C2 -> C3 ต่อเนื่อง
+# ค่าสัมประสิทธิ์ถูกปรับให้ Quick Transit ของ A320 (78 ที่นั่ง/Zone, Z1/Z2 = 78/78)
+# ใช้เวลาประมาณ 8 นาทีต่อ Zone เมื่อทำ C1 -> C2 -> C3 ต่อเนื่อง (3 + 3 + 2 นาที)
 # ซึ่งอยู่ในระดับที่สอดคล้องกับ turnaround cleaning แบบเร่งด่วนเมื่อแบ่งทีมทำงานขนานกัน
 ZONE_DURATION_COEFF = {
     # เก็บขยะ: เดินเก็บขยะ/seat pocket ตามจำนวนที่นั่งใน Work Unit
@@ -396,8 +396,7 @@ def build_tasks(aircraft: str,
 # 6) เซต P ลำดับก่อน-หลัง
 # ==================================================================
 def build_precedence(tasks: List[Task],
-                     trash_first_global: bool = False,
-                     deicing_last_global: bool = False) -> List[Tuple[str, str]]:
+                     trash_first_global: bool = False) -> List[Tuple[str, str]]:
     """
     ลำดับภายในหน่วยพื้นที่  C1 -> OVH -> D -> C2 -> C3 -> E -> F
 
@@ -407,9 +406,9 @@ def build_precedence(tasks: List[Task],
 
     งานตรวจสอบซ้ำ RC ต้องทำหลังงานห้องน้ำและครัวเสร็จทั้งหมด
 
-    เมื่อ deicing_last_global=True (Scenario S5) จะกำหนดให้งาน DEI1
-    เริ่มได้หลังงาน Cleaning/ground-service อื่นทั้งหมดในแบบจำลองเสร็จแล้ว
-    เพื่อแทนการ De-icing ช่วงท้ายของ turnaround ก่อนออกเดินทาง
+    หมายเหตุ Scenario S5: งาน DEI1 ไม่มีความสัมพันธ์ก่อน-หลังในเซต P
+    เวลาเริ่มของ DEI1 ถูกกำหนดให้เท่ากับ 0 ใน solver.py (constraint 9)
+    เพื่อให้การฉีด De-icing ทำคู่ขนานกับงาน Cleaning ตั้งแต่เริ่ม turnaround
     """
     ids = {t.id for t in tasks}
     zones = sorted({t.zone for t in tasks if t.zone.startswith("Z")})
@@ -432,12 +431,6 @@ def build_precedence(tasks: List[Task],
         P.extend((t.id, "RC1") for t in tasks if t.kind == "LAV")
     if "RC2" in ids:
         P.extend((t.id, "RC2") for t in tasks if t.kind == "GAL")
-
-    # Scenario S5: De-icing เป็นขั้นตอนท้ายของ turnaround
-    if deicing_last_global and "DEI1" in ids:
-        for t in tasks:
-            if t.id != "DEI1" and (t.id, "DEI1") not in P:
-                P.append((t.id, "DEI1"))
 
     return P
 
@@ -510,6 +503,39 @@ SCENARIOS = {
 
 SERVICE_ZONES = ("LAV", "GAL", "CREW", "CHECK", "DEICE")
 
+DEICING_WORKER_ID = "DEICE1"
+
+
+def scenario_settings(scenario: str) -> dict:
+    """
+    แหล่งกำหนดนโยบายของแต่ละ Scenario เพียงจุดเดียว
+    app.py และ run_experiments.py ต้องเรียกฟังก์ชันนี้ ห้ามเขียนเงื่อนไขซ้ำเอง
+
+        zone_based       S2, S4, S5   แบ่งพนักงานตามหน่วยพื้นที่
+        trash_first      S3, S4, S5   เก็บขยะทุกหน่วยพื้นที่เสร็จก่อนดูดฝุ่น
+        include_deicing  S5           เพิ่มงาน DEI1 และพนักงาน DEICE1
+    """
+    return {
+        "zone_based": scenario in ("S2", "S4", "S5"),
+        "trash_first": scenario in ("S3", "S4", "S5"),
+        "include_deicing": scenario == "S5",
+    }
+
+
+def build_scenario_workers(n_total: int, scenario: str) -> Tuple[List[str], str | None]:
+    """
+    n_total = จำนวนพนักงานรวมทั้งหมดของ Scenario
+    S5 กัน 1 คนเป็น DEICE1 จึงเหลือ Cleaner = n_total - 1
+
+    คืนค่า (รายชื่อพนักงาน, ชื่อพนักงาน De-icing หรือ None)
+    """
+    include_deicing = scenario_settings(scenario)["include_deicing"]
+    if include_deicing and n_total < 2:
+        raise ValueError("S5 ต้องมีพนักงานรวมอย่างน้อย 2 คน: Cleaner 1 คน + DEICE1 1 คน")
+    n_clean = n_total - (1 if include_deicing else 0)
+    workers = build_workers(n_clean, add_deicing_worker=include_deicing)
+    return workers, (DEICING_WORKER_ID if include_deicing else None)
+
 
 def build_workers(n_workers: int,
                   add_deicing_worker: bool = False) -> List[str]:
@@ -525,7 +551,7 @@ def build_workers(n_workers: int,
     """
     workers = [f"M{i + 1}" for i in range(n_workers)]
     if add_deicing_worker:
-        workers.append("DEICE1")
+        workers.append(DEICING_WORKER_ID)
     return workers
 
 
