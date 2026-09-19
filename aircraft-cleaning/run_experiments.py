@@ -38,6 +38,8 @@ from aircraft_data import (
     build_precedence,
     build_tasks,
     build_workers,
+    build_scenario_workers,
+    scenario_settings,
 )
 from solver import ProblemData, solve_model
 
@@ -50,17 +52,20 @@ SOLVER_SECONDS = 20.0
 def make_problem(aircraft, n_workers, T, scenario="S1",
                  enforce_T=True, objective="Time Only", blocking=True,
                  cleaning=DEFAULT_CLEANING_TYPE, weather=DEFAULT_WEATHER):
-    tasks = build_tasks(aircraft, CLEANING_TYPES[cleaning], weather)
-    workers = build_workers(n_workers)
-    zone_based = scenario in ("S2", "S4")
-    trash_first = scenario in ("S3", "S4")
+    # ใช้นโยบาย Scenario จาก aircraft_data.scenario_settings ชุดเดียวกับ app.py
+    # n_workers = จำนวนพนักงานรวม (S5 รวม DEICE1 แล้ว)
+    cfg = scenario_settings(scenario)
+    tasks = build_tasks(aircraft, CLEANING_TYPES[cleaning], weather,
+                        include_deicing=cfg["include_deicing"])
+    workers, deicing_worker = build_scenario_workers(n_workers, scenario)
     return ProblemData(
         aircraft=aircraft,
         workers=workers,
         tasks=tasks,
         T=T,
-        a=build_capability(workers, tasks, zone_based=zone_based),
-        P=build_precedence(tasks, trash_first_global=trash_first),
+        a=build_capability(workers, tasks, zone_based=cfg["zone_based"],
+                           dedicated_deicing_worker=deicing_worker),
+        P=build_precedence(tasks, trash_first_global=cfg["trash_first"]),
         B=build_blocking(tasks) if blocking else [],
         enforce_time_limit=enforce_T,
         objective_mode=objective,
@@ -85,6 +90,8 @@ def run(aircraft, n_workers, T, scenario="S1", enforce_T=True,
         "Buffer": res.buffer,
         "Status": res.status,
         "Feasible": res.feasible,
+        "Best Bound": res.best_bound,
+        "Gap %": res.gap_pct,
         "Solve Time (s)": round(res.solve_time, 2),
     }
 
