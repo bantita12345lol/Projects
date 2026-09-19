@@ -63,6 +63,8 @@ class SolveResult:
     workload: pd.DataFrame
     message: str = ""
     solve_time: float = 0.0
+    best_bound: float | None = None   # ขอบล่างของค่า Objective ที่ Solver พิสูจน์ได้
+    gap_pct: float | None = None      # ช่องว่างระหว่างคำตอบกับขอบล่าง (%) ; 0 = พิสูจน์แล้วว่า Optimal
 
 
 EMPTY_SCHEDULE = pd.DataFrame(
@@ -101,10 +103,12 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
 
     # ---- ตัวแปรตัดสินใจ x[i,j,t] -------------------------------------
     # Constraint (2) ถูกบังคับโดยไม่สร้างตัวแปรเมื่อ a[i,j] = 0
+    # คู่ (i,j) ที่ไม่มีใน a ถือว่า "ทำไม่ได้" (fail-closed) เพื่อไม่ให้ข้อมูลที่ขาดหาย
+    # กลายเป็นการอนุญาตให้พนักงานทำงานที่ไม่ได้รับมอบหมายโดยไม่ตั้งใจ
     x: Dict[Tuple[str, str, int], cp_model.IntVar] = {}
     for i in I:
         for j in J:
-            if data.a.get((i, j), 1) == 0:
+            if data.a.get((i, j), 0) == 0:
                 continue
             for t in H[j]:
                 x[(i, j, t)] = model.NewBoolVar(f"x_{i}_{j}_{t}")
@@ -238,7 +242,19 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
             })
     schedule = pd.DataFrame(rows).sort_values(["Start", "Worker"]).reset_index(drop=True)
 
-    cmax_value = int(solver.Value(cmax))
+    # Cmax ที่รายงานคำนวณจากเวลาเสร็จจริงของตาราง ไม่ใช้ค่าตัวแปร cmax โดยตรง
+    # เพราะในโหมด Workload Only ไม่มี Objective ใดกดตัวแปร cmax ลง
+    # ตัวแปรจึงอาจมีค่าใดก็ได้ระหว่างเวลาเสร็จจริงถึง T
+    cmax_value = int(schedule["End"].max())
+
+    # ความเหมาะสมที่สุดของคำตอบ: OPTIMAL = พิสูจน์แล้ว (gap = 0)
+    # FEASIBLE = หมดเวลาก่อนพิสูจน์ คำตอบอาจยังไม่ใช่ค่าที่ดีที่สุด
+    obj_value = solver.ObjectiveValue()
+    best_bound = solver.BestObjectiveBound()
+    if status == cp_model.OPTIMAL:
+        gap_pct = 0.0
+    else:
+        gap_pct = round(abs(obj_value - best_bound) / max(1.0, abs(obj_value)) * 100, 2)
     workload = (
         schedule.groupby("Worker")
         .agg(Tasks=("Task", "count"), BusyMinutes=("Duration", "sum"))
@@ -259,8 +275,11 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
         buffer=T - cmax_value,
         schedule=schedule,
         workload=workload,
-        message="",
+        message="" if status == cp_model.OPTIMAL else
+                "คำตอบยังไม่ได้รับการพิสูจน์ว่าเหมาะสมที่สุด (FEASIBLE) — ดู Gap %",
         solve_time=solver.WallTime(),
+        best_bound=best_bound,
+        gap_pct=gap_pct,
     )
 
 
@@ -282,6 +301,8 @@ def compare_scenarios(build_fn, scenarios: List[str], max_seconds: float = 20.0)
             "Buffer": res.buffer if res.feasible else None,
             "Status": res.status,
             "Feasible": res.feasible,
+            "Best Bound": res.best_bound,
+            "Gap %": res.gap_pct,
             "Solve Time (s)": round(res.solve_time, 2),
         })
     return pd.DataFrame(rows)
