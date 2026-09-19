@@ -43,6 +43,8 @@ from aircraft_data import (
     build_precedence,
     build_tasks,
     build_workers,
+    build_scenario_workers,
+    scenario_settings,
 )
 from solver import ProblemData, compare_scenarios, solve_model
 
@@ -672,9 +674,10 @@ max_seconds = st.sidebar.slider(
     5,
 )
 
-zone_based = scenario in ("S2", "S4", "S5")
-trash_first = scenario in ("S3", "S4", "S5")
-include_deicing = scenario == "S5"
+_cfg = scenario_settings(scenario)   # แหล่งกำหนดนโยบาย Scenario จุดเดียว (aircraft_data.py)
+zone_based = _cfg["zone_based"]
+trash_first = _cfg["trash_first"]
+include_deicing = _cfg["include_deicing"]
 
 # จำนวนพนักงานที่กรอกบน Sidebar = จำนวนพนักงานรวมทั้งหมด
 # S5 กันพนักงาน 1 คนไว้เป็น DEICE1 จึงเหลือ Cleaner = m - 1
@@ -849,11 +852,7 @@ with tab_setup:
         f"LAV+GAL จำกัดไม่เกิน {SERVICE_WORKLOAD_LIMIT} นาที/คน"
     )
 
-    dedicated_deicing_worker = "DEICE1" if include_deicing else None
-    workers = build_workers(
-        cleaning_worker_count,
-        add_deicing_worker=include_deicing,
-    )
+    workers, dedicated_deicing_worker = build_scenario_workers(int(n_workers), scenario)
     skill_key = (
         f"{signature}|{n_workers}|{zone_based}|dedicated={dedicated_deicing_worker}|service25_v2|"
         f"{len(tasks)}|{','.join(t.id for t in tasks)}"
@@ -910,7 +909,6 @@ with tab_setup:
                 P=build_precedence(
                     tasks,
                     trash_first_global=trash_first,
-                    deicing_last_global=False,
                 ),
                 B=build_blocking(tasks) if use_blocking else [],
                 enforce_time_limit=enforce_T,
@@ -964,7 +962,8 @@ with tab_result:
 
         st.caption(
             f"Aircraft {data.aircraft} · Scenario {data.scenario} ({SCENARIOS[data.scenario]}) · "
-            f"Objective {data.objective_mode} · Solver status {result.status} · "
+            f"Objective {data.objective_mode} · Solver status {result.status} "
+            f"(Gap {result.gap_pct}%) · "
             f"Solve time {result.solve_time:.2f} s · Max worker utilization {max_util:.1f}%"
         )
 
@@ -1142,18 +1141,12 @@ with tab_compare:
 
         def build_fn(s: str) -> ProblemData:
             scenario_tasks = tasks_for_scenario(s)
-            zb = s in ("S2", "S4", "S5")
-            tf = s in ("S3", "S4", "S5")
-            deice_last = False
+            cfg = scenario_settings(s)
+            zb = cfg["zone_based"]
+            tf = cfg["trash_first"]
 
-            # จำนวนพนักงาน m คือจำนวนรวมทั้งหมด
-            # S5 กัน 1 คนเป็น DEICE1 จึงเหลือ Cleaning workforce = m - 1
-            scenario_cleaning_workers = int(n_workers) - (1 if s == "S5" else 0)
-            scenario_workers = build_workers(
-                scenario_cleaning_workers,
-                add_deicing_worker=(s == "S5"),
-            )
-            dedicated_worker = "DEICE1" if s == "S5" else None
+            # จำนวนพนักงาน m คือจำนวนรวมทั้งหมด (S5 รวม DEICE1)
+            scenario_workers, dedicated_worker = build_scenario_workers(int(n_workers), s)
 
             return ProblemData(
                 aircraft=aircraft,
@@ -1169,7 +1162,6 @@ with tab_compare:
                 P=build_precedence(
                     scenario_tasks,
                     trash_first_global=tf,
-                    deicing_last_global=deice_last,
                 ),
                 B=build_blocking(scenario_tasks) if use_blocking else [],
                 enforce_time_limit=enforce_T,
@@ -1282,7 +1274,6 @@ $$\min\; C_{\max}$$
         P = build_precedence(
             tasks_now,
             trash_first_global=trash_first,
-            deicing_last_global=False,
         )
         p_display = pd.DataFrame([
             {
