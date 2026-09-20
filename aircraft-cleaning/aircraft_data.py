@@ -197,7 +197,7 @@ MODEL_ASSUMPTIONS = [
     ("ห้องน้ำ", "2 นาทีต่อห้อง", "งานวิจัยรายงาน ~115–120 วินาที"),
     ("ครัว", "3 นาทีต่อจุด", "งานวิจัยรายงาน 100–149 วินาที (ใช้ค่าสูง)"),
     ("ระยะไล่ตาม k", "1 นาที (ปรับได้)", "สมมติฐานของโครงงาน · ทดสอบความไว k = 0, 1, 2"),
-    ("จำนวนพนักงานห้องน้ำ/ครัว (S2)", "เริ่มจาก ⌈ภาระงาน ÷ เวลา⌉ แล้วลองจำนวนที่มากขึ้น เลือกแบบที่เสร็จเร็วที่สุด", "สมมติฐานของตัวแบบ"),
+    ("จำนวนพนักงานห้องน้ำ/ครัว (S2)", "เริ่มจาก ⌈ภาระงาน ÷ เวลา⌉ แล้วลองจำนวนที่มากขึ้น เลือกแบบที่เสร็จเร็วที่สุด", "วิธีการของตัวแบบ"),
     ("สุขอนามัย", "คนเดียวกันทำทั้งครัวและห้องน้ำ ต้องทำครัวก่อน", "สมมติฐานของโครงงาน"),
     ("เวลาเดินระหว่างจุด", "รวมอยู่ใน 0.5 นาทีเตรียมงานต่อโซน", "ข้อจำกัดของตัวแบบ"),
     ("De-icing", "เฉพาะ S3 ทำหลังทำความสะอาดเสร็จทุกงาน", "กรณีขยายผล"),
@@ -370,7 +370,7 @@ def deicing_duration_minutes(tasks: List[Task]) -> int:
 
 def cleaning_time_window(tasks: List[Task], T: int, scenario: str) -> int:
     """
-    เวลาที่พนักงานทำความสะอาด มีจริงก่อนกิจกรรมสุดท้ายของ Scenario.
+    เวลาที่พนักงานทำความสะอาดมีจริงก่อนกิจกรรมสุดท้ายของ Scenario.
 
     S1/S2: T_clean = T
     S3:    T_clean = T - d_DEI เพราะ De-icing ต้องทำหลัง Cleaning ทั้งหมด
@@ -404,7 +404,7 @@ def required_service_workers(tasks: List[Task], T: int, scenario: str) -> int:
 def service_worker_count_options(tasks: List[Task], T: int, scenario: str,
                                  n_workers_total: int) -> List[int]:
     """
-    Candidate Service-worker counts for S2/S3.
+    Candidate Service-team sizes for S2/S3.
 
     workload/T_clean provides only a LOWER BOUND.  When more cleaning workers
     are available, the outer search may allocate additional workers to Service
@@ -429,16 +429,16 @@ def service_worker_count_options(tasks: List[Task], T: int, scenario: str,
     return list(range(lb, max_service + 1))
 
 
-def minimum_total_workers_for_scenario(tasks: List[Task], T: int, scenario: str) -> int:
+def minimum_total_workers_for_policy(tasks: List[Task], T: int, scenario: str) -> int:
     """
-    Lower bound ที่สอดคล้องกับ Scenario S1-S3.
+    Lower bound ที่สอดคล้องกับการแบ่งหน้าที่ของ S1-S3.
 
     S1: ทุกคนยืดหยุ่น -> ceil(W_clean/T)
 
     S2/S3: Service workers ถูกแยกจาก Cabin workers จึงคำนวณเป็นสองก้อน
         m_service = ceil(W_service/T_clean)
         m_cabin   = ceil(W_cabin/T_clean)
-        m_total   = m_service + m_cabin (+1 DEICE1 ใน S3)
+        m_total   = m_service + m_cabin (+1 DEICE_TEAM ใน S3)
 
     เป็นเพียงจุดเริ่มค้นหา; precedence, follow-lag, hygiene และการแบ่งโซน
     อาจทำให้จำนวนที่ต้องใช้จริงสูงกว่านี้.
@@ -486,7 +486,7 @@ def build_scenario_workers(n_workers_total: int, scenario: str) -> Tuple[List[st
     n_workers_total = จำนวนพนักงานรวมที่ผู้ใช้กำหนด.
 
     S1/S2: M1..Mm
-    S3:    M1..M(m-1) + DEICE1
+    S3:    M1..M(m-1) + DEICE_TEAM
     """
     if n_workers_total < 1:
         return [], None
@@ -497,7 +497,7 @@ def build_scenario_workers(n_workers_total: int, scenario: str) -> Tuple[List[st
     workers = [f"M{i+1}" for i in range(n_cleaning)]
     deicing_worker = None
     if include_deicing:
-        deicing_worker = "DEICE1"
+        deicing_worker = "DEICE_TEAM"
         workers.append(deicing_worker)
     return workers, deicing_worker
 
@@ -520,13 +520,13 @@ def build_capability(workers: List[str], tasks: List[Task],
         ถ้ามีพนักงานมากกว่า Zone จะมีหลายคนต่อ Zone และทำงานไล่ตามกันด้วย k.
       - งานอื่นที่ไม่ใช่ Cabin และไม่ใช่ LAV/GAL เช่น Crew/Final Check
         เปิดให้ Cleaning workers ทุกคนทำได้.
-      - DEICE1 ทำเฉพาะ DEI และ Cleaner ไม่ทำ DEI.
+      - DEICE_TEAM ทำเฉพาะ DEI และ Cleaner ไม่ทำ DEI.
     """
     a: Dict[Tuple[str, str], int] = {}
 
     cleaning_workers = [w for w in workers if w != dedicated_deicing_worker]
 
-    # Dedicated De-icing worker แยกจากพนักงานทำความสะอาด โดยสมบูรณ์
+    # พนักงาน De-icing แยกจากพนักงานทำความสะอาดโดยสมบูรณ์
     if dedicated_deicing_worker is not None:
         for w in workers:
             for t in tasks:
