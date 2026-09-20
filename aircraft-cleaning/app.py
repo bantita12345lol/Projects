@@ -35,7 +35,7 @@ from aircraft_data import (
     build_tasks,
     cleaning_kinds,
     cleaning_time_window,
-    minimum_total_workers_for_scenario,
+    minimum_total_workers_for_policy,
     required_service_workers,
     service_worker_count_options,
     service_workload_minutes,
@@ -58,7 +58,7 @@ MODE_TH = {
 
 
 def worker_name(w: str) -> str:
-    if w == "DEICE1":
+    if w == "DEICE_TEAM":
         return "พนักงาน De-icing"
     if w.startswith("M") and w[1:].isdigit():
         return f"พนักงาน {int(w[1:])} ({w})"
@@ -158,28 +158,57 @@ def workload_display_df(workload: pd.DataFrame) -> pd.DataFrame:
     })
 
 
+SHORT_LABEL = {
+    "C1": "ขยะ", "D": "เช็ด", "C2": "ดูดฝุ่น", "C3": "จัดเรียบร้อย", "OVH": "ช่องเก็บของ",
+    "E": "พื้นผิว", "F": "ผ้าห่ม", "FD": "ห้องนักบิน", "CR": "ห้องลูกเรือ", "DEI": "De-icing",
+}
+
+
+def short_label(task_id: str, kind: str, zone: str) -> str:
+    """ข้อความสั้นในแท่ง Gantt เช่น 'ขยะ Z1', 'ห้องน้ำ 2', 'ครัว 1', 'ตรวจซ้ำห้องน้ำ'"""
+    if kind == "LAV":
+        return f"ห้องน้ำ {task_id[1:]}"
+    if kind == "GAL":
+        return f"ครัว {task_id[1:]}"
+    if kind == "RC":
+        return "ตรวจซ้ำห้องน้ำ" if task_id == "RC1" else "ตรวจซ้ำครัว"
+    base = SHORT_LABEL.get(kind, kind)
+    return f"{base} {zone}" if zone.startswith("Z") else base
+
+
 def gantt_chart(schedule: pd.DataFrame, workers: list[str], T: int, cmax: int) -> go.Figure:
     fig = go.Figure()
     plot = schedule.copy()
     plot["WorkerDisplay"] = plot.Worker.map(worker_name)
+    plot["Label"] = [short_label(t, k, z) for t, k, z in zip(plot.Task, plot.Kind, plot.Zone)]
+    order = [worker_name(w) for w in workers][::-1]
     for kind in plot.Kind.unique():
         sub = plot[plot.Kind == kind]
         fig.add_trace(go.Bar(
             y=sub.WorkerDisplay, x=sub.Duration, base=sub.Start, orientation="h",
             name=TASK_KIND_LABEL.get(kind, kind), marker_color=KIND_COLORS.get(kind, "#64748B"),
-            text=sub.TaskName, textposition="inside",
-            customdata=sub[["Task", "Start", "End"]],
-            hovertemplate=(
-                "<b>%{text}</b><br>Task %{customdata[0]}"
-                "<br>Start %{customdata[1]}<br>End %{customdata[2]}<extra></extra>"
-            ),
+            marker_line=dict(color="white", width=1),
+            text=sub.Label, textposition="inside", insidetextanchor="middle",
+            textfont=dict(size=12, color="white"),
+            customdata=sub[["TaskName", "Start", "End"]],
+            hovertemplate="<b>%{customdata[0]}</b><br>นาที %{customdata[1]} – %{customdata[2]}<extra></extra>",
         ))
-    fig.add_vline(x=cmax, line_dash="dash", annotation_text=f"เสร็จทั้งหมด {cmax} นาที")
-    fig.add_vline(x=T, line_dash="dot", line_color="#C2410C", annotation_text=f"เวลาจอด T = {T} นาที")
+    if cmax == T:
+        fig.add_vline(x=T, line_dash="dash", line_color="#C2410C",
+                      annotation_text=f"เสร็จทั้งหมด = เวลาจอด = {T} นาที", annotation_position="top left")
+    else:
+        fig.add_vline(x=cmax, line_dash="dash", line_color="#1F2937",
+                      annotation_text=f"เสร็จทั้งหมด {cmax} นาที", annotation_position="top left")
+        fig.add_vline(x=T, line_dash="dot", line_color="#C2410C",
+                      annotation_text=f"เวลาจอด {T} นาที", annotation_position="top right")
     fig.update_layout(
-        barmode="overlay", height=max(420, 70 * len(workers) + 140),
-        xaxis_title="เวลานับจากเริ่มทำความสะอาด (นาที)", yaxis_title="พนักงาน",
-        legend_title="ประเภทงาน", margin=dict(l=10, r=10, t=60, b=10),
+        barmode="overlay", height=max(380, 64 * len(workers) + 150),
+        xaxis=dict(title="เวลานับจากเริ่มทำความสะอาด (นาที)", dtick=1 if max(T, cmax) <= 40 else 5,
+                   range=[0, max(T, cmax) + 1], showgrid=True, gridcolor="#EEF2F7"),
+        yaxis=dict(title="", categoryorder="array", categoryarray=order),
+        uniformtext=dict(minsize=9, mode="hide"),
+        legend=dict(title="ประเภทงาน", orientation="h", y=-0.18, itemclick=False, itemdoubleclick=False),
+        margin=dict(l=10, r=10, t=50, b=10), plot_bgcolor="white",
     )
     return fig
 
@@ -258,17 +287,17 @@ default_workers = {"S1": 4, "S2": 4, "S3": 5}.get(scenario_hint, 4)
 n_workers = st.sidebar.number_input(
     "จำนวนพนักงานรวม (m)", 1, 30, default_workers, 1,
     key=f"workers_{scenario_hint}",
-    help="S3 นับพนักงาน De-icing เป็น 1 ในจำนวนนี้",
+    help="S3 นับพนักงาน De-icing 1 คนรวมในจำนวนนี้",
 )
 T = st.sidebar.number_input(
     "เวลาจอด T (นาที)", 5, 300, 30, 5,
     help=(
-        "เวลาที่กำหนดสำหรับกิจกรรมในขอบเขตของตัวแบบ ตั้งแต่เริ่มกระบวนการจนกิจกรรมสุดท้ายใน Scenario เสร็จ · "
-        "S3 รวมเวลา De-icing ด้วย"
+        "เวลาที่ทำความสะอาดได้จริง ตั้งแต่ผู้โดยสารลงหมดจนถึงก่อนผู้โดยสารขึ้น · "
+        "S3: ต้องรวมเวลา De-icing ด้วย"
     ),
 )
 
-st.sidebar.subheader("3) เงื่อนไขและข้อจำกัด")
+st.sidebar.subheader("3) รูปแบบการจัดงานและข้อจำกัด")
 scenario = st.sidebar.selectbox(
     "Scenario", list(SCENARIOS),
     format_func=lambda s: f"{s} — {SCENARIOS[s]}",
@@ -350,10 +379,10 @@ def build_problem(tasks: list[Task], m_total: int, s: str,
     )
 
 
-def solve_scenario(tasks: list[Task], m_total: int, s: str,
+def solve_policy(tasks: list[Task], m_total: int, s: str,
                  a_override: dict | None = None,
                  enforce: bool = True, seconds: float | None = None):
-    """Solve one scenario, including an outer search over Service-worker count."""
+    """Solve one scenario, including an outer search over Service-team size."""
     c = scenario_settings(s)
     if not c["zone_based"]:
         data = build_problem(tasks, m_total, s, service_count=0,
@@ -389,10 +418,10 @@ def solve_scenario(tasks: list[Task], m_total: int, s: str,
 
 
 preview_tasks = default_tasks(scenario)
-scenario_lb = minimum_total_workers_for_scenario(preview_tasks, int(T), scenario)
-if int(n_workers) < scenario_lb:
+policy_lb = minimum_total_workers_for_policy(preview_tasks, int(T), scenario)
+if int(n_workers) < policy_lb:
     st.sidebar.warning(
-        f"ตามภาระงาน ต้องใช้พนักงานอย่างน้อย {scenario_lb} คน จำนวนที่กรอกอาจไม่พอ"
+        f"ตามภาระงาน ต้องใช้พนักงานอย่างน้อย {policy_lb} คน จำนวนที่กรอกอาจไม่พอ"
     )
 
 
@@ -413,7 +442,7 @@ if cfg["zone_based"]:
     svc_opts = service_worker_count_options(preview_tasks, int(T), scenario, int(n_workers))
     st.caption(
         f"{scenario}: งานห้องน้ำ + ครัวรวม {service_workload_minutes(preview_tasks)} นาที · "
-        f"ระบบจะลองพนักงานห้องน้ำ/ครัว {', '.join(map(str, svc_opts)) + ' คน' if svc_opts else '— (พนักงานไม่พอ)'} "
+        f"ระบบจะลองจำนวนพนักงานห้องน้ำ/ครัว {', '.join(map(str, svc_opts)) + ' คน' if svc_opts else '— (พนักงานไม่พอ)'} "
         "แล้วเลือกแบบที่เสร็จเร็วที่สุด"
     )
 if cfg["include_deicing"]:
@@ -459,13 +488,13 @@ with setup:
     total_clean = sum(t.duration for t in cleaning_tasks)
     svc_work = service_workload_minutes(tasks)
     svc_lb = required_service_workers(tasks, int(T), scenario) if cfg["zone_based"] else 0
-    scenario_lb = minimum_total_workers_for_scenario(tasks, int(T), scenario)
+    policy_lb = minimum_total_workers_for_policy(tasks, int(T), scenario)
 
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("จำนวนงาน (Tasks)", len(tasks))
     a2.metric("เวลางานรวม (Workload)", f"{total_clean} นาที")
     a3.metric("งานห้องน้ำ + ครัว", f"{svc_work} นาที")
-    a4.metric("พนักงานขั้นต่ำตามภาระงาน", f"{scenario_lb} คน",
+    a4.metric("พนักงานขั้นต่ำตามภาระงาน", f"{policy_lb} คน",
               help="คำนวณจากเวลางานรวม ÷ เวลาจอด ยังไม่คิดลำดับงาน จำนวนที่ต้องใช้จริงอาจมากกว่านี้")
 
     workers_now, dedicated_now = build_scenario_workers(int(n_workers), scenario)
@@ -486,7 +515,7 @@ with setup:
         )
         st.session_state["skill_df"] = skill_df
     else:
-        st.caption("ตัวอย่างการแบ่งหน้าที่ (สร้างอัตโนมัติ) · ตอนคำนวณ ระบบจะลองขนาดพนักงานห้องน้ำ/ครัวหลายแบบแล้วเลือกแบบที่ดีที่สุด")
+        st.caption("ตัวอย่างการแบ่งหน้าที่ (สร้างอัตโนมัติ) · ตอนคำนวณ ระบบจะลองจำนวนพนักงานห้องน้ำ/ครัวหลายแบบแล้วเลือกแบบที่ดีที่สุด")
         st.dataframe(st.session_state["skill_df"], width="stretch", hide_index=True)
 
     run_btn = st.button(
@@ -500,17 +529,17 @@ with setup:
         elif calc_mode == "schedule":
             a_manual = df_to_capability(st.session_state["skill_df"], tasks) if scenario == "S1" else None
             with st.spinner("กำลังคำนวณตารางงาน..."):
-                data, res, ptable = solve_scenario(tasks, int(n_workers), scenario, a_manual, enforce_T)
+                data, res, ptable = solve_policy(tasks, int(n_workers), scenario, a_manual, enforce_T)
             st.session_state["data"] = data
             st.session_state["result"] = res
             st.session_state["partition_table"] = ptable
             st.session_state["minw_table"] = None
         else:
-            start = minimum_total_workers_for_scenario(tasks, int(T), scenario)
+            start = minimum_total_workers_for_policy(tasks, int(T), scenario)
 
             def min_solve(m: int):
                 ts = tasks_for_scenario(tasks, scenario)
-                data, res, _ = solve_scenario(ts, m, scenario, enforce=True)
+                data, res, _ = solve_policy(ts, m, scenario, enforce=True)
                 return data, res
 
             with st.spinner("กำลังหาจำนวนพนักงานน้อยที่สุด..."):
@@ -520,7 +549,7 @@ with setup:
             st.session_state["result"] = res
             st.session_state["minw_table"] = table
             if best_m is not None:
-                data, res2, ptable = solve_scenario(tasks_for_scenario(tasks, scenario), best_m, scenario, enforce=True)
+                data, res2, ptable = solve_policy(tasks_for_scenario(tasks, scenario), best_m, scenario, enforce=True)
                 st.session_state["data"] = data
                 st.session_state["result"] = res2
                 st.session_state["partition_table"] = ptable
@@ -532,7 +561,12 @@ with setup:
         if res and res.feasible:
             d_ = st.session_state.get("data")
             who = f"ใช้พนักงาน {len(d_.workers)} คน · " if d_ is not None else ""
-            st.success(f"{who}ทำความสะอาดเสร็จที่นาทีที่ {res.cmax} · เหลือเวลาเผื่อ {res.buffer} นาที · ดูผลในแท็บ 02 และ 03")
+            clean_end = int(res.schedule[res.schedule.Kind != "DEI"]["End"].max())
+            if (res.schedule.Kind == "DEI").any():
+                st.success(f"{who}ทำความสะอาดเสร็จที่นาทีที่ {clean_end} · De-icing เสร็จที่นาทีที่ {res.cmax} · "
+                           f"เหลือเวลาเผื่อ {res.buffer} นาที · ดูผลในแท็บ 02 และ 03")
+            else:
+                st.success(f"{who}ทำความสะอาดเสร็จที่นาทีที่ {res.cmax} · เหลือเวลาเผื่อ {res.buffer} นาที · ดูผลในแท็บ 02 และ 03")
         elif res:
             st.error(res.message)
         else:
@@ -563,7 +597,7 @@ with result_tab:
     elif not result.feasible:
         st.error(result.message)
     else:
-        cleaning_workers = [w for w in data.workers if w != "DEICE1"]
+        cleaning_workers = [w for w in data.workers if w != "DEICE_TEAM"]
         cleaner_load = result.workload[result.workload.Worker.isin(cleaning_workers)]
         avg_util = float(cleaner_load["Utilization %"].mean()) if len(cleaner_load) else 0.0
 
@@ -579,7 +613,7 @@ with result_tab:
             st.warning("ใช้เวลาเกินเวลาจอด ควรเพิ่มพนักงานหรือเวลาจอด")
 
         if ptable is not None and len(ptable) > 1:
-            with st.expander("การเลือกขนาดพนักงานห้องน้ำ/ครัว"):
+            with st.expander("การเลือกจำนวนพนักงานห้องน้ำ/ครัว"):
                 pv = ptable[["Service Workers", "Cmax"]].rename(columns={"Service Workers": "พนักงานห้องน้ำ/ครัว (คน)", "Cmax": "เวลาเสร็จ (นาที)"})
                 st.dataframe(pv, width="stretch", hide_index=True)
                 st.caption("เลือกแบบที่เสร็จเร็วที่สุด ถ้าเท่ากันเลือกแบบที่ภาระงานสมดุลกว่า")
@@ -593,7 +627,7 @@ with result_tab:
             "Aircraft": data.aircraft,
             "Scenario": data.scenario,
             "Cleaning Workers": len(cleaning_workers),
-            "Deicing Resource": int("DEICE1" in data.workers),
+            "Deicing Resource": int("DEICE_TEAM" in data.workers),
             "Service Workers": data.service_worker_count,
             "T": data.T,
             "Cmax": result.cmax,
@@ -613,7 +647,7 @@ with result_tab:
             "Assumptions": assumptions,
         }
         if ptable is not None:
-            sheets["Service Worker Search"] = ptable
+            sheets["Service Team Search"] = ptable
         if minw is not None:
             sheets["Workforce Search"] = minw
         st.download_button(
@@ -634,11 +668,6 @@ with gantt_tab:
         st.info("ยังไม่มีตารางงาน กดคำนวณในแท็บ 01 ก่อน")
     else:
         st.caption("แต่ละแถว = พนักงาน 1 คน · แท่ง = งาน (สีตามประเภทงาน) · เส้นประ = เวลาที่ทุกงานเสร็จ · เส้นจุดสีส้ม = เวลาจอด · ช่องว่าง = เวลาว่าง")
-        st.info(
-            "หลัง Solver เลือกพนักงานและลำดับงานแล้ว ระบบจะเลื่อนงานให้เริ่มเร็วที่สุดเท่าที่ข้อจำกัดอนุญาต "
-            "โดยไม่เปลี่ยนว่าใครทำงานไหนและไม่เปลี่ยนลำดับงานของพนักงานแต่ละคน ดังนั้นช่องว่างที่ยังเหลืออยู่ "
-            "คือเวลาที่จำเป็นจากลำดับงาน ระยะไล่ตาม k หรือข้อจำกัดอื่นของตัวแบบ"
-        )
         st.plotly_chart(gantt_chart(result.schedule, data.workers, data.T, result.cmax), width="stretch")
         st.plotly_chart(workload_chart(result.workload), width="stretch")
 
@@ -659,7 +688,7 @@ with compare_tab:
         base = df_to_tasks(st.session_state["tasks_df"])
         jobs = []
         for s_ in scenarios_to_compare:
-            lb = max(minimum_total_workers_for_scenario(tasks_for_scenario(base, s_), int(T), s_), 1)
+            lb = max(minimum_total_workers_for_policy(tasks_for_scenario(base, s_), int(T), s_), 1)
             jobs += [(s_, m) for m in range(max(m_range[0], 2 if s_ != "S1" else 1), m_range[1] + 1)]
         total_jobs = len(jobs) + len(scenarios_to_compare)
         bar = st.progress(0.0, text="กำลังคำนวณ...")
@@ -670,16 +699,16 @@ with compare_tab:
                 done += 1
                 continue
             bar.progress(done / total_jobs, text=f"{s_} · พนักงาน {m} คน")
-            data_s, res_s, _ = solve_scenario(ts, m, s_, enforce=False, seconds=per_solve)
+            data_s, res_s, _ = solve_policy(ts, m, s_, enforce=False, seconds=per_solve)
             rows.append({"Scenario": s_, "Workers": m, "Cmax": res_s.cmax if res_s.feasible else None})
             done += 1
         for s_ in scenarios_to_compare:
             ts = tasks_for_scenario(base, s_)
             bar.progress(done / total_jobs, text=f"{s_} · หาจำนวนพนักงานน้อยที่สุด")
-            start_lb = minimum_total_workers_for_scenario(ts, int(T), s_)
+            start_lb = minimum_total_workers_for_policy(ts, int(T), s_)
 
             def scenario_min_solve(m: int, ts=ts, s_=s_):
-                d, r, _ = solve_scenario(ts, m, s_, enforce=True, seconds=per_solve)
+                d, r, _ = solve_policy(ts, m, s_, enforce=True, seconds=per_solve)
                 return d, r
 
             mb, rb, _ = find_min_workers(scenario_min_solve, start_lb, 30, per_solve)
@@ -716,8 +745,7 @@ with compare_tab:
 with model_tab:
     st.subheader("ตัวแบบทางคณิตศาสตร์")
     st.caption("แบ่งเวลาเป็นช่องละ 1 นาที แล้วเลือกว่าพนักงานคนไหนเริ่มงานไหนที่นาทีใด "
-               "ให้งานสุดท้ายเสร็จเร็วที่สุด โดยไม่ผิดข้อจำกัดข้อใด · ค่าเริ่มต้นระยะไล่ตาม k = 1 นาที")
-    st.caption("หลังได้คำตอบ ระบบจัดตารางให้เริ่มเร็วที่สุดโดยคงพนักงานที่ได้รับมอบหมายและลำดับงานของแต่ละคนไว้เดิม")
+               "ให้งานสุดท้ายเสร็จเร็วที่สุด โดยไม่ผิดข้อจำกัดข้อใด")
     st.markdown("**ตัวแปรตัดสินใจ**")
     st.latex(r"x_{ijt}=1\ \text{ถ้าพนักงาน } i \text{ เริ่มงาน } j \text{ ที่นาที } t,\ \text{ไม่เช่นนั้น } 0")
     st.latex(r"S_j=\sum_{i}\sum_{t} t\,x_{ijt},\qquad E_j=S_j+d_j")
@@ -728,7 +756,7 @@ with model_tab:
     st.markdown("**ข้อจำกัด**")
     cons = [
         ("(1) ทุกงานทำ 1 ครั้ง", r"\sum_{i}\sum_{t}x_{ijt}=1\quad\forall j"),
-        ("(2) ทำได้เฉพาะงานที่รับผิดชอบ (S2/S3 ใช้กำหนดพนักงาน)", r"x_{ijt}\le a_{ij}\quad\forall i,j,t"),
+        ("(2) ทำได้เฉพาะงานที่รับผิดชอบ (S2/S3 ใช้กำหนดการแบ่งหน้าที่)", r"x_{ijt}\le a_{ij}\quad\forall i,j,t"),
         ("(3) พนักงาน 1 คนทำได้ทีละงาน", r"\sum_{j}\sum_{t:\,t\le\tau<t+d_j}x_{ijt}\le 1\quad\forall i,\tau"),
         ("(4a) งานในโซนเดียวกันไล่ตามกันด้วยระยะห่าง k นาที", r"S_k\ge S_j+k,\qquad E_k\ge E_j+k\quad\forall (j,k)\in P_{zone}"),
         ("(4b) งานอื่นต้องรองานก่อนเสร็จ (ตรวจซ้ำ, De-icing ใน S3)", r"E_j\le S_k\quad\forall (j,k)\in P\setminus P_{zone}"),
@@ -740,9 +768,9 @@ with model_tab:
     for title, eq in cons:
         st.markdown(title)
         st.latex(eq)
-    st.markdown("**ขนาดพนักงานห้องน้ำ/ครัวใน S2 และ S3**")
+    st.markdown("**จำนวนพนักงานห้องน้ำ/ครัวใน S2 และ S3**")
     st.latex(r"m_{service}^{LB}=\left\lceil W_{service}\,/\,T_{clean}\right\rceil")
-    st.caption("ใช้เป็นจุดเริ่มเท่านั้น ระบบลองจำนวนพนักงาน m_LB, m_LB+1, ... แล้วเลือกแบบที่เสร็จเร็วที่สุด · "
+    st.caption("ใช้เป็นจุดเริ่มเท่านั้น ระบบลองจำนวน m_LB, m_LB+1, ... แล้วเลือกแบบที่เสร็จเร็วที่สุด · "
                "S3: T_clean = T − เวลา De-icing")
     st.subheader("สมมติฐานของตัวแบบ")
     st.dataframe(pd.DataFrame(MODEL_ASSUMPTIONS, columns=["รายการ", "ค่าที่ใช้", "ที่มา"]),
