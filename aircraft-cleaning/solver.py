@@ -44,7 +44,7 @@ class ProblemData:
     enforce_time_limit: bool = True
     objective_mode: str = "Time + Workload"  # Time + Workload (ใช้งานจริง) | Time Only (ใช้ตรวจสอบ)
     scenario: str = "S1"
-    # Secondary workload balancing can exclude special resources such as DEICE_TEAM.
+    # Secondary workload balancing can exclude special resources such as DEICE1.
     balance_workers: List[str] | None = None
     # Reporting metadata for S2/S3 outer search.
     service_worker_count: int | None = None
@@ -91,6 +91,77 @@ def _same_cabin_zone(j: str, k: str, tasks: Dict[str, Task]) -> bool:
         and tasks[j].zone == tasks[k].zone
         and tasks[j].zone.startswith("Z")
     )
+
+
+
+def _compact_schedule_earliest(data: ProblemData, schedule: pd.DataFrame,
+                               cmax_value: int, max_seconds: float = 3.0) -> pd.DataFrame:
+    """เลื่อนงานไปทางซ้ายให้เริ่มเร็วที่สุดหลัง Solver เลือกคนและลำดับงานแล้ว
+
+    คงไว้ทั้งหมด:
+    - คนที่ได้รับมอบหมายให้ทำแต่ละงาน
+    - ลำดับงานของพนักงานแต่ละคน
+    - precedence / follow-lag k / hygiene ที่เกิดจากลำดับเดิม
+    - Cmax เดิม (ยึดงานที่จบสุดเดิมไว้ที่เวลาเดิม)
+
+    ขั้นตอนนี้เป็นการจัดรูปตารางคำตอบเพื่อกำจัดเวลาว่างที่ไม่จำเป็น
+    ไม่ใช่การเปลี่ยนคำตอบด้านการมอบหมายงานหรือภาระงาน.
+    """
+    if schedule is None or schedule.empty or cmax_value is None:
+        return schedule
+
+    tasks = {t.id: t for t in data.tasks}
+    present = set(schedule["Task"].astype(str))
+    if not present:
+        return schedule
+
+    model = cp_model.CpModel()
+    lag = max(0, int(data.follow_lag))
+    s = {}
+    e = {}
+    for j in present:
+        d = int(tasks[j].duration)
+        latest = max(0, int(cmax_value) - d)
+        s[j] = model.NewIntVar(0, latest, f"compact_s_{j}")
+        e[j] = model.NewIntVar(d, int(cmax_value), f"compact_e_{j}")
+        model.Add(e[j] == s[j] + d)
+
+    # คงลำดับงานของพนักงานแต่ละคนตามคำตอบเดิม
+    for _, g in schedule.groupby("Worker", sort=False):
+        ordered = g.sort_values(["Start", "End", "Task"])["Task"].astype(str).tolist()
+        for a, b in zip(ordered, ordered[1:]):
+            model.Add(s[b] >= e[a])
+
+    # คงข้อจำกัดลำดับงานของโมเดล
+    for j, k in data.P:
+        if j not in present or k not in present:
+            continue
+        if _same_cabin_zone(j, k, tasks):
+            model.Add(s[k] >= s[j] + lag)
+            model.Add(e[k] >= e[j] + lag)
+        else:
+            model.Add(s[k] >= e[j])
+
+    # ยึดงานที่จบสุดเดิมไว้ เพื่อให้ Cmax ไม่เปลี่ยน
+    critical = schedule.loc[schedule["End"] == int(cmax_value)].sort_values("Task")
+    if not critical.empty:
+        crit_task = str(critical.iloc[0]["Task"])
+        model.Add(e[crit_task] == int(cmax_value))
+
+    # เมื่อ assignment/order ถูกตรึงแล้ว การลดผลรวมเวลาเริ่มจะดันงานไปซ้าย
+    model.Minimize(sum(s.values()))
+    compact_solver = cp_model.CpSolver()
+    compact_solver.parameters.max_time_in_seconds = float(max_seconds)
+    compact_solver.parameters.num_search_workers = available_cpus()
+    st = compact_solver.Solve(model)
+    if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return schedule
+
+    out = schedule.copy()
+    new_start = {j: int(compact_solver.Value(s[j])) for j in present}
+    out["Start"] = out["Task"].map(new_start).astype(int)
+    out["End"] = out["Start"] + out["Duration"].astype(int)
+    return out.sort_values(["Start", "Worker", "Task"]).reset_index(drop=True)
 
 
 def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
@@ -258,6 +329,12 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
     schedule = pd.DataFrame(rows).sort_values(["Start", "Worker", "Task"]).reset_index(drop=True)
 
     cmax_value = int(solver.Value(cmax))
+
+    # จัดรูปตารางคำตอบ: เลื่อนงานให้เริ่มเร็วที่สุดโดยไม่เปลี่ยนคนหรือลำดับงาน
+    schedule = _compact_schedule_earliest(
+        data, schedule, cmax_value, max_seconds=min(3.0, max(0.5, float(max_seconds) * 0.15))
+    )
+
     workload = (
         schedule.groupby("Worker")
         .agg(Tasks=("Task", "count"), BusyMinutes=("Duration", "sum"))
@@ -295,11 +372,11 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
 
 def solve_best_variant(build_fn, variants, max_seconds: float = 20.0):
     """
-    Solve a small family of policy variants and choose lexicographically by
+    Solve a small family of scenario variants and choose lexicographically by
     (Cmax, maximum balanced-worker load, variant value).
 
     Used for S2/S3 to avoid treating the Service-workload lower bound as a
-    fixed team size.  Returns (best_variant, best_data, best_result, table).
+    fixed worker count.  Returns (best_variant, best_data, best_result, table).
     """
     rows = []
     best = None
