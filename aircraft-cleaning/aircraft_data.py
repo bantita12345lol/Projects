@@ -41,10 +41,10 @@ AIRCRAFT_LIBRARY: Dict[str, dict] = {
         "source": "Study configuration assumption: 1 Work Unit, Z1 = 90 seats",
     },
     "A320-200": {
-        "category": "Narrow-body Aircraft", "seats": 156, "seats_abreast": 6,
-        "zones": [("Z1", "Zone 1", 78), ("Z2", "Zone 2", 78)],
+        "category": "Narrow-body Aircraft", "seats": 180, "seats_abreast": 6,
+        "zones": [("Z1", "Zone 1", 90), ("Z2", "Zone 2", 90)],
         "n_lav": 3, "n_gal": 2,
-        "source": "Study configuration assumption: balanced Work Units 78/78",
+        "source": "180-seat single-class A320 as used in the cleaning study of Schultz et al.; Work Units 90/90",
     },
     "B737-800": {
         "category": "Narrow-body Aircraft", "seats": 189, "seats_abreast": 6,
@@ -98,19 +98,19 @@ DEFAULT_AIRCRAFT = "A320-200"
 # 2) Tasks / cleaning types
 # ==================================================================
 TASK_KIND_LABEL = {
-    "C1": "Trash Collection",
-    "C2": "Vacuum",
-    "C3": "Cosmetic / Cabin Appearance",
-    "D": "Seat Area Wipe",
-    "E": "Additional Surface Cleaning",
-    "F": "Amenity Setup",
-    "LAV": "Lavatory Cleaning",
-    "GAL": "Galley Cleaning",
-    "OVH": "Overhead Bin Cleaning",
-    "FD": "Flight Deck Cleaning",
-    "CR": "Crew Cabin Cleaning",
-    "RC": "Final Recheck",
-    "DEI": "Aircraft De-icing",
+    "C1": "เก็บขยะ",
+    "C2": "ดูดฝุ่น",
+    "C3": "จัดความเรียบร้อย",
+    "D": "เช็ดช่องเก็บของ/โต๊ะพับ/ที่วางแขน",
+    "E": "ทำความสะอาดพื้นผิวเพิ่มเติม",
+    "F": "จัดผ้าห่ม/หมอน/หูฟัง",
+    "LAV": "ห้องน้ำ",
+    "GAL": "ครัว",
+    "OVH": "ช่องเก็บสัมภาระเหนือศีรษะ",
+    "FD": "ห้องนักบิน",
+    "CR": "ห้องพักลูกเรือ",
+    "RC": "ตรวจความสะอาดซ้ำ",
+    "DEI": "De-icing",
 }
 
 SCOPE_MAPPING = [
@@ -131,15 +131,13 @@ SCOPE_MAPPING = [
 QUICK_TRANSIT = "Quick Transit"
 LAYOVER = "Layover"
 
+# Quick Transit = งานหลักตามขอบเขตข้อ 4.1.1-4.1.6 (รวม 4.1.3 เช็ดบริเวณที่นั่ง)
+# งาน 4.1.7 (ทำเมื่อมีเวลาเหลือ) และ 4.1.8 (เฉพาะบางสายการบิน) เป็นงานไม่บังคับ
+# จึงไม่รวมใน Quick Transit และรวมไว้ใน Layover ซึ่งมีเวลาจอดนานพอ
 CLEANING_TYPES: Dict[str, List[str]] = {
-    QUICK_TRANSIT: ["C1", "C2", "C3", "LAV", "GAL"],
+    QUICK_TRANSIT: ["C1", "D", "C2", "C3", "LAV", "GAL"],
     LAYOVER: ["C1", "OVH", "D", "C2", "C3", "E", "F",
               "LAV", "GAL", "FD", "CR", "RC"],
-}
-
-QUICK_TRANSIT_OPTIONAL = {
-    "E": "Additional Surface Cleaning",
-    "F": "Amenity Setup",
 }
 
 DEFAULT_CLEANING_TYPE = QUICK_TRANSIT
@@ -193,17 +191,17 @@ DEICING_DURATION_BY_AIRCRAFT = {
 }
 
 MODEL_ASSUMPTIONS = [
-    ("Weather", "Normal/Clear fixed baseline", "Project scope"),
-    ("Time resolution", "1 minute discrete time", "Modeling assumption"),
-    ("Cabin duration", "Row-level literature benchmark + 0.5 min setup/walking allowance per task-zone", "Literature-calibrated assumption"),
-    ("Lavatory", "2 min per unit", "~115-120 s field benchmark, rounded"),
-    ("Galley", "3 min per unit", "~149 s field benchmark, rounded conservatively"),
-    ("Follow lag k", "Default 1 min; adjustable", "Project assumption representing one work-front separation"),
-    ("Service team", "ceil(service workload / T_clean) is a lower bound; alternative team sizes are searched", "Optimization policy"),
-    ("Hygiene", "If same worker does GAL and LAV, GAL must finish first", "Conservative project assumption"),
-    ("Transition", "No separate sequence-dependent travel time; short movement is absorbed in task allowance", "Model limitation"),
-    ("De-icing", "S3 only, treated as Winter Extension after all cleaning", "Special-case extension"),
-    ("Aircraft configuration", "Seat/LAV/GAL/zone values are study configurations, not operator-specific certified layouts", "Project assumption"),
+    ("สภาพอากาศ", "ปกติ (Normal/Clear) คงที่", "ขอบเขตโครงงาน"),
+    ("ความละเอียดของเวลา", "ช่องละ 1 นาที", "สมมติฐานของตัวแบบ"),
+    ("เวลางานในห้องโดยสาร", "วินาทีต่อแถว × จำนวนแถว + 0.5 นาทีเตรียมงาน/เดิน แล้วปัดขึ้นเป็นนาที", "ปรับเทียบจาก Schultz et al. (2020)"),
+    ("ห้องน้ำ", "2 นาทีต่อห้อง", "งานวิจัยรายงาน ~115–120 วินาที"),
+    ("ครัว", "3 นาทีต่อจุด", "งานวิจัยรายงาน 100–149 วินาที (ใช้ค่าสูง)"),
+    ("ระยะไล่ตาม k", "1 นาที (ปรับได้)", "สมมติฐานของโครงงาน · ทดสอบความไว k = 0, 1, 2"),
+    ("ขนาดทีมห้องน้ำ/ครัว (S2)", "เริ่มจาก ⌈ภาระงาน ÷ เวลา⌉ แล้วลองจำนวนที่มากขึ้น เลือกแบบที่เสร็จเร็วที่สุด", "นโยบายของตัวแบบ"),
+    ("สุขอนามัย", "คนเดียวกันทำทั้งครัวและห้องน้ำ ต้องทำครัวก่อน", "สมมติฐานของโครงงาน"),
+    ("เวลาเดินระหว่างจุด", "รวมอยู่ใน 0.5 นาทีเตรียมงานต่อโซน", "ข้อจำกัดของตัวแบบ"),
+    ("De-icing", "เฉพาะ S3 ทำหลังทำความสะอาดเสร็จทุกงาน", "กรณีขยายผล"),
+    ("ข้อมูลอากาศยาน", "จำนวนที่นั่ง ห้องน้ำ ครัว เป็นค่าสำหรับการศึกษา", "สมมติฐานของโครงงาน"),
 ]
 
 ZONE_TASK_ORDER = ["C1", "OVH", "D", "C2", "C3", "E", "F"]
@@ -242,16 +240,8 @@ def fixed_duration(kind: str, factor: float = 1.0) -> int:
     return _scaled_minutes(FIXED_DURATION[kind], factor)
 
 
-def cleaning_kinds(cleaning_type: str,
-                   include_surface: bool = False,
-                   include_amenity: bool = False) -> List[str]:
-    kinds = list(CLEANING_TYPES[cleaning_type])
-    if cleaning_type == QUICK_TRANSIT:
-        if include_surface and "E" not in kinds:
-            kinds.append("E")
-        if include_amenity and "F" not in kinds:
-            kinds.append("F")
-    return kinds
+def cleaning_kinds(cleaning_type: str) -> List[str]:
+    return list(CLEANING_TYPES[cleaning_type])
 
 
 def build_tasks(aircraft: str,
@@ -268,36 +258,36 @@ def build_tasks(aircraft: str,
                 continue
             tasks.append(Task(
                 id=f"{kind}{zone_id}", kind=kind, zone=zone_id,
-                name=f"{TASK_KIND_LABEL[kind]} - {zone_name}",
+                name=f"{TASK_KIND_LABEL[kind]} - {zone_name.replace('Zone', 'โซน')}",
                 duration=estimate_zone_duration(kind, seats, spec.get("seats_abreast", 6), duration_factor),
             ))
 
     if "LAV" in kinds:
         for n in range(1, spec["n_lav"] + 1):
-            tasks.append(Task(f"A{n}", "LAV", "LAV", f"Lavatory {n}",
+            tasks.append(Task(f"A{n}", "LAV", "LAV", f"ห้องน้ำ {n}",
                               fixed_duration("LAV", duration_factor)))
     if "GAL" in kinds:
         for n in range(1, spec["n_gal"] + 1):
-            tasks.append(Task(f"B{n}", "GAL", "GAL", f"Galley {n}",
+            tasks.append(Task(f"B{n}", "GAL", "GAL", f"ครัว {n}",
                               fixed_duration("GAL", duration_factor)))
     if "FD" in kinds:
-        tasks.append(Task("FD1", "FD", "CREW", "Flight Deck",
+        tasks.append(Task("FD1", "FD", "CREW", "ห้องนักบิน",
                           fixed_duration("FD", duration_factor)))
     if "CR" in kinds:
-        tasks.append(Task("CR1", "CR", "CREW", "Crew Cabin",
+        tasks.append(Task("CR1", "CR", "CREW", "ห้องพักลูกเรือ",
                           fixed_duration("CR", duration_factor)))
     if "RC" in kinds:
         if "LAV" in kinds:
-            tasks.append(Task("RC1", "RC", "CHECK", "Recheck Lavatory",
+            tasks.append(Task("RC1", "RC", "CHECK", "ตรวจซ้ำห้องน้ำ",
                               fixed_duration("RC", duration_factor)))
         if "GAL" in kinds:
-            tasks.append(Task("RC2", "RC", "CHECK", "Recheck Galley",
+            tasks.append(Task("RC2", "RC", "CHECK", "ตรวจซ้ำครัว",
                               fixed_duration("RC", duration_factor)))
 
     if include_deicing:
         # De-icing duration is a scenario-specific duration and is not scaled
         # by the cleaning-duration sensitivity factor.
-        tasks.append(Task("DEI1", "DEI", "DEICE", "Aircraft De-icing",
+        tasks.append(Task("DEI1", "DEI", "DEICE", "De-icing",
                           DEICING_DURATION_BY_AIRCRAFT.get(aircraft, 15)))
     return tasks
 
@@ -341,9 +331,9 @@ def build_precedence(tasks: List[Task]) -> List[Tuple[str, str]]:
 # 5) Scenario / workforce capability
 # ==================================================================
 SCENARIOS = {
-    "S1": "Flexible - พนักงาน Cleaning ทุกคนทำงานได้ทุกประเภท",
-    "S2": "Zone-based - Service ตามภาระงาน + Cabin workers กระจายตามโซน",
-    "S3": "S2 + Dedicated De-icing worker และ De-icing เป็นงานท้ายสุด",
+    "S1": "ยืดหยุ่น — ทุกคนทำได้ทุกงาน",
+    "S2": "แบ่งหน้าที่ — ทีมห้องน้ำ/ครัว + ทีมห้องโดยสารประจำโซน",
+    "S3": "S2 + De-icing หลังทำความสะอาดเสร็จ (กรณีฤดูหนาว)",
 }
 
 
