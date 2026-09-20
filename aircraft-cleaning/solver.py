@@ -20,6 +20,8 @@ Key model choices
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
@@ -40,7 +42,7 @@ class ProblemData:
     follow_lag: int = DEFAULT_FOLLOW_LAG
     hygiene_galley_first: bool = True
     enforce_time_limit: bool = True
-    objective_mode: str = "Time + Workload"  # Time Only | Time + Workload | Workload Only
+    objective_mode: str = "Time + Workload"  # Time + Workload (ใช้งานจริง) | Time Only (ใช้ตรวจสอบ)
     scenario: str = "S1"
     # Secondary workload balancing can exclude special resources such as DEICE_TEAM.
     balance_workers: List[str] | None = None
@@ -65,6 +67,22 @@ class SolveResult:
 EMPTY_SCHEDULE = pd.DataFrame(
     columns=["Worker", "Task", "TaskName", "Zone", "Kind", "Start", "End", "Duration"]
 )
+
+
+def available_cpus(cap: int = 8) -> int:
+    """จำนวน CPU ที่ใช้ได้จริง (อ่านโควตา cgroup ของ container ถ้ามี)"""
+    n = os.cpu_count() or 1
+    try:
+        n = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        pass
+    try:
+        quota, period = open("/sys/fs/cgroup/cpu.max").read().split()
+        if quota != "max":
+            n = min(n, max(1, int(-(-int(quota) // int(period)))))
+    except (OSError, ValueError):
+        pass
+    return max(1, min(cap, n))
 
 
 def _same_cabin_zone(j: str, k: str, tasks: Dict[str, Task]) -> bool:
@@ -197,9 +215,7 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
     max_load = model.NewIntVar(0, total_duration, "max_load")
     model.AddMaxEquality(max_load, [load[i] for i in balance_ids])
 
-    if data.objective_mode == "Workload Only":
-        model.Minimize(max_load)
-    elif data.objective_mode == "Time + Workload":
+    if data.objective_mode == "Time + Workload":
         # Two-level objective encoded by a dominating weight:
         # (1) minimize Cmax, then (2) among equal-Cmax schedules minimize
         # maximum workload of balance_workers.  total_duration+1 guarantees
@@ -210,7 +226,8 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(max_seconds)
-    solver.parameters.num_search_workers = 8
+    # ใช้จำนวนเธรดตาม CPU ที่ได้รับจริง (Streamlit Cloud มี CPU น้อย การตั้ง 8 เธรดทำให้ช้าลง)
+    solver.parameters.num_search_workers = available_cpus()
     status = solver.Solve(model)
     status_name = solver.StatusName(status)
 
@@ -348,4 +365,3 @@ def find_min_workers(build_fn, m_min: int, m_max: int = 30,
             row["Minimum Proven"] = not uncertain_below
             break
     return best_m, best_res, pd.DataFrame(rows)
-
