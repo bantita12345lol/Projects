@@ -382,7 +382,6 @@ def exp5_sensitivity(T=30, m=4):
 def exp6_cleaning_type():
     cases = [
         ("Quick Transit", QUICK_TRANSIT, (), 30),
-        ("Quick Transit + E/F", QUICK_TRANSIT, ("E", "F"), 30),
         ("Layover", LAYOVER, (), 60),
     ]
     rows = []
