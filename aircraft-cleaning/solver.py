@@ -1,31 +1,21 @@
 """
 solver.py
 ------------------------------------------------------------------
-Time-indexed Binary Optimization Model
-แก้ด้วย Google OR-Tools CP-SAT
+Time-indexed Binary Optimization Model solved by Google OR-Tools CP-SAT.
 
-ตัวแปรตัดสินใจ
-    x[i,j,t] = 1 ถ้าพนักงาน i เริ่มงาน j ที่เวลา t
-    Cmax     = เวลาที่งานสุดท้ายเสร็จ
+Decision variable
+    x[i,j,t] = 1 if worker i starts task j at time t
+    Cmax     = completion time of the last modeled activity
 
-นิพจน์ที่คำนวณจากตัวแปร (ไม่ใช่ตัวแปรตัดสินใจ)
-    S_j = sum_i sum_t  t * x[i,j,t]
-    E_j = sum_i sum_t (t + d_j) * x[i,j,t]
-
-Objective
-    min Cmax
-
-Constraints
-    (1) ทุกงานถูกทำหนึ่งครั้ง
-    (2) พนักงานต้องทำงานนั้นได้        x[i,j,t] <= a[i,j]
-    (3) พนักงานหนึ่งคนทำงานซ้อนไม่ได้
-    (4) ลำดับก่อน-หลัง                 E_j <= S_k   สำหรับ (j,k) in P
-    (5) เชื่อมเวลาเสร็จกับ Cmax        Cmax >= E_j
-    (6) ไม่เกิน Time Limit             Cmax <= T    (เปิด/ปิดได้)
-    (7) งานที่ Block กันทำพร้อมกันไม่ได้
-    (8) ภาระงาน LAV + GAL ต่อพนักงาน <= 25 นาที
-    (9) S5: DEI1 เริ่มที่ t = 0
-    (10) x in {0,1}, Cmax in Z>=0
+Key model choices
+    - Same-zone cabin tasks use a follow-lag pipeline with adjustable k:
+        S_k >= S_j + k
+        E_k >= E_j + k
+      This models workers following each other through the same cabin zone.
+    - Cross-area precedence is strict finish-to-start:
+        E_j <= S_k
+    - If the same worker performs both GAL and LAV, GAL must finish before LAV starts.
+    - In S3, DEI1 is linked by precedence after every cleaning task.
 """
 
 from __future__ import annotations
@@ -36,7 +26,7 @@ from typing import Dict, List, Tuple
 import pandas as pd
 from ortools.sat.python import cp_model
 
-from aircraft_data import SERVICE_TASK_KINDS, SERVICE_WORKLOAD_LIMIT, Task
+from aircraft_data import DEFAULT_FOLLOW_LAG, Task
 
 
 @dataclass
@@ -47,15 +37,20 @@ class ProblemData:
     T: int
     a: Dict[Tuple[str, str], int]
     P: List[Tuple[str, str]] = field(default_factory=list)
-    B: List[Tuple[str, str]] = field(default_factory=list)
+    follow_lag: int = DEFAULT_FOLLOW_LAG
+    hygiene_galley_first: bool = True
     enforce_time_limit: bool = True
-    objective_mode: str = "Time Only"     # Time Only | Time + Workload | Workload Only
+    objective_mode: str = "Time + Workload"  # Time Only | Time + Workload | Workload Only
     scenario: str = "S1"
+    # Secondary workload balancing can exclude special resources such as DEICE_TEAM.
+    balance_workers: List[str] | None = None
+    # Reporting metadata for S2/S3 outer search.
+    service_worker_count: int | None = None
 
 
 @dataclass
 class SolveResult:
-    status: str                # OPTIMAL / FEASIBLE / INFEASIBLE / ...
+    status: str
     feasible: bool
     cmax: int | None
     buffer: int | None
@@ -63,8 +58,8 @@ class SolveResult:
     workload: pd.DataFrame
     message: str = ""
     solve_time: float = 0.0
-    best_bound: float | None = None   # ขอบล่างของค่า Objective ที่ Solver พิสูจน์ได้
-    gap_pct: float | None = None      # ช่องว่างระหว่างคำตอบกับขอบล่าง (%) ; 0 = พิสูจน์แล้วว่า Optimal
+    gap_pct: float | None = None
+    max_balance_load: int | None = None
 
 
 EMPTY_SCHEDULE = pd.DataFrame(
@@ -72,39 +67,42 @@ EMPTY_SCHEDULE = pd.DataFrame(
 )
 
 
+def _same_cabin_zone(j: str, k: str, tasks: Dict[str, Task]) -> bool:
+    return (
+        j in tasks and k in tasks
+        and tasks[j].zone == tasks[k].zone
+        and tasks[j].zone.startswith("Z")
+    )
+
+
 def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
     tasks = {t.id: t for t in data.tasks}
-    J = list(tasks.keys())
+    J = list(tasks)
     I = list(data.workers)
     T = int(data.T)
+    lag = max(0, int(data.follow_lag))
 
     if not J:
-        return SolveResult("NO_TASK", False, None, None, EMPTY_SCHEDULE.copy(),
-                           pd.DataFrame(), "ยังไม่มีงานในรายการ")
+        return SolveResult("NO_TASK", False, None, None, EMPTY_SCHEDULE.copy(), pd.DataFrame(),
+                           "ยังไม่มีงานในรายการ")
     if not I:
-        return SolveResult("NO_WORKER", False, None, None, EMPTY_SCHEDULE.copy(),
-                           pd.DataFrame(), "ยังไม่มีพนักงาน")
+        return SolveResult("NO_WORKER", False, None, None, EMPTY_SCHEDULE.copy(), pd.DataFrame(),
+                           "ยังไม่มีพนักงาน")
 
     total_duration = sum(t.duration for t in data.tasks)
     horizon = T if data.enforce_time_limit else max(T, total_duration)
 
-    # งานที่ยาวเกินขอบเขตเวลา -> ตอบไม่ได้ตั้งแต่ต้น
     too_long = [j for j in J if tasks[j].duration > horizon]
     if too_long:
         return SolveResult(
             "INFEASIBLE", False, None, None, EMPTY_SCHEDULE.copy(), pd.DataFrame(),
-            f"งาน {', '.join(too_long)} ใช้เวลานานกว่าเวลาจอดที่กำหนด ({horizon} นาที)",
+            f"งาน {', '.join(too_long)} ใช้เวลานานกว่าขอบเขตเวลาที่กำหนด ({horizon} นาที)",
         )
 
-    # H_j = {0, 1, ..., horizon - d_j}
     H = {j: list(range(0, horizon - tasks[j].duration + 1)) for j in J}
-
     model = cp_model.CpModel()
 
-    # ---- ตัวแปรตัดสินใจ x[i,j,t] -------------------------------------
-    # Constraint (2) ถูกบังคับโดยไม่สร้างตัวแปรเมื่อ a[i,j] = 0
-    # คู่ (i,j) ที่ไม่มีใน a ถือว่า "ทำไม่ได้" (fail-closed) เพื่อไม่ให้ข้อมูลที่ขาดหาย
-    # กลายเป็นการอนุญาตให้พนักงานทำงานที่ไม่ได้รับมอบหมายโดยไม่ตั้งใจ
+    # x[i,j,t]
     x: Dict[Tuple[str, str, int], cp_model.IntVar] = {}
     for i in I:
         for j in J:
@@ -113,19 +111,20 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
             for t in H[j]:
                 x[(i, j, t)] = model.NewBoolVar(f"x_{i}_{j}_{t}")
 
-    # ---- Constraint (1) ทุกงานถูกทำหนึ่งครั้ง -------------------------
+    # (1) Every task exactly once
     for j in J:
         lits = [x[(i, j, t)] for i in I for t in H[j] if (i, j, t) in x]
         if not lits:
             return SolveResult(
                 "INFEASIBLE", False, None, None, EMPTY_SCHEDULE.copy(), pd.DataFrame(),
-                f"ไม่มีพนักงานคนใดทำงาน {j} ได้ (a_ij = 0 ทั้งหมด) กรุณาแก้ตาราง Skill Matrix",
+                f"ไม่มีพนักงานที่มีสิทธิ์ทำงาน {j} ตาม capability matrix",
             )
         model.AddExactlyOne(lits)
 
-    # ---- นิพจน์ S_j และ E_j -------------------------------------------
+    # Derived expressions
     start_expr = {
-        j: sum(t * x[(i, j, t)] for i in I for t in H[j] if (i, j, t) in x) for j in J
+        j: sum(t * x[(i, j, t)] for i in I for t in H[j] if (i, j, t) in x)
+        for j in J
     }
     end_expr = {
         j: sum((t + tasks[j].duration) * x[(i, j, t)]
@@ -133,7 +132,7 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
         for j in J
     }
 
-    # ---- Constraint (3) พนักงานคนเดียวทำงานซ้อนไม่ได้ -----------------
+    # (3) A worker cannot overlap tasks
     for i in I:
         for tau in range(horizon):
             active = [
@@ -145,70 +144,70 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
             if len(active) > 1:
                 model.AddAtMostOne(active)
 
-    # ---- Constraint (8) ภาระงานห้องน้ำ + ห้องครัวต่อคน <= 25 นาที ----
-    # นับจากผลรวม duration ของงาน LAV/GAL ที่พนักงานคนนั้นได้รับมอบหมาย
-    # หาก service workload รวมเกิน 25 นาที Solver จำเป็นต้องกระจายไปคนเพิ่ม
-    for i in I:
-        service_load_terms = [
-            tasks[j].duration * x[(i, j, t)]
-            for j in J
-            if tasks[j].kind in SERVICE_TASK_KINDS
-            for t in H[j]
-            if (i, j, t) in x
-        ]
-        if service_load_terms:
-            model.Add(sum(service_load_terms) <= SERVICE_WORKLOAD_LIMIT)
-
-    # ---- Constraint (4) ลำดับก่อน-หลัง --------------------------------
-    for (j, k) in data.P:
-        if j in tasks and k in tasks:
-            model.Add(end_expr[j] <= start_expr[k])
-
-    # ---- Scenario S5: De-icing เริ่มทันทีที่นาที 0 ----------------------
-    # DEICE1 เป็นพนักงานเฉพาะงาน DEI1 อยู่แล้วจาก capability matrix
-    # จึงกำหนดเวลาเริ่มของ DEI1 = 0 เพื่อให้การฉีด De-icing ทำคู่ขนานกับ
-    # งาน Cleaning/ground-service ตั้งแต่เริ่ม turnaround ได้โดยตรง
-    if data.scenario == "S5" and "DEI1" in tasks:
-        model.Add(start_expr["DEI1"] == 0)
-
-    # ---- Constraint (7) งานที่ Block กัน ------------------------------
-    for (j, k) in data.B:
+    # (4) Precedence
+    for j, k in data.P:
         if j not in tasks or k not in tasks:
             continue
-        for tau in range(horizon):
-            active_j = [x[(i, j, t)] for i in I for t in H[j]
-                        if (i, j, t) in x and t <= tau < t + tasks[j].duration]
-            active_k = [x[(i, k, t)] for i in I for t in H[k]
-                        if (i, k, t) in x and t <= tau < t + tasks[k].duration]
-            if active_j and active_k:
-                model.Add(sum(active_j) + sum(active_k) <= 1)
+        if _same_cabin_zone(j, k, tasks):
+            # D1-B: following worker stays at least k minutes behind the previous task.
+            # The end-lag condition prevents the follower from overtaking a longer task.
+            model.Add(start_expr[k] >= start_expr[j] + lag)
+            model.Add(end_expr[k] >= end_expr[j] + lag)
+        else:
+            model.Add(end_expr[j] <= start_expr[k])
 
-    # ---- Constraint (5)(6) และ Objective ------------------------------
+    # (7) Hygiene rule: if the same worker performs GAL and LAV,
+    # Galley must finish before Lavatory starts.
+    if data.hygiene_galley_first:
+        gal = [j for j in J if tasks[j].kind == "GAL"]
+        lav = [j for j in J if tasks[j].kind == "LAV"]
+        for i in I:
+            for g in gal:
+                for l in lav:
+                    # Forbid any pair of starts on the same worker that would place
+                    # LAV before GAL has finished. If tasks are on different workers,
+                    # this condition has no effect.
+                    for tg in H[g]:
+                        if (i, g, tg) not in x:
+                            continue
+                        for tl in H[l]:
+                            if (i, l, tl) not in x:
+                                continue
+                            if tl < tg + tasks[g].duration:
+                                model.Add(x[(i, g, tg)] + x[(i, l, tl)] <= 1)
+
+    # (5)(6) Cmax and turnaround limit
     cmax = model.NewIntVar(0, horizon, "Cmax")
     for j in J:
         model.Add(cmax >= end_expr[j])
     if data.enforce_time_limit:
         model.Add(cmax <= T)
 
-    load = {}
+    # Workload for tie-breaking / reporting
+    load: Dict[str, cp_model.IntVar] = {}
     for i in I:
         load[i] = model.NewIntVar(0, total_duration, f"load_{i}")
         model.Add(load[i] == sum(
             tasks[j].duration * x[(i, j, t)]
             for j in J for t in H[j] if (i, j, t) in x
         ))
+    balance_ids = [i for i in (data.balance_workers or I) if i in load]
+    if not balance_ids:
+        balance_ids = list(I)
     max_load = model.NewIntVar(0, total_duration, "max_load")
-    model.AddMaxEquality(max_load, list(load.values()))
+    model.AddMaxEquality(max_load, [load[i] for i in balance_ids])
 
     if data.objective_mode == "Workload Only":
         model.Minimize(max_load)
     elif data.objective_mode == "Time + Workload":
-        # ถ่วงน้ำหนักให้ Cmax เป็นเป้าหมายหลัก แล้วใช้ workload เป็นตัวตัดสินเมื่อเสมอกัน
+        # Two-level objective encoded by a dominating weight:
+        # (1) minimize Cmax, then (2) among equal-Cmax schedules minimize
+        # maximum workload of balance_workers.  total_duration+1 guarantees
+        # a one-minute Cmax improvement dominates any workload difference.
         model.Minimize(cmax * (total_duration + 1) + max_load)
     else:
         model.Minimize(cmax)
 
-    # ---- Solve --------------------------------------------------------
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(max_seconds)
     solver.parameters.num_search_workers = 8
@@ -216,17 +215,16 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
     status_name = solver.StatusName(status)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        msg = (
-            f"ไม่พบคำตอบที่เป็นไปได้ภายในเวลาจอด {T} นาที "
-            f"ด้วยพนักงาน {len(I)} คน — ลองเพิ่มพนักงาน เพิ่มเวลาจอด "
-            f"หรือปิดข้อจำกัด Time Limit"
-            if status_name == "INFEASIBLE" else
-            f"Solver จบด้วยสถานะ {status_name}"
-        )
+        if status_name == "INFEASIBLE":
+            msg = (
+                f"ไม่พบคำตอบภายใน T = {T} นาที ด้วยพนักงาน {len(I)} คน "
+                "ภายใต้ Scenario และข้อจำกัดที่เลือก"
+            )
+        else:
+            msg = f"Solver จบด้วยสถานะ {status_name}"
         return SolveResult(status_name, False, None, None, EMPTY_SCHEDULE.copy(),
-                           pd.DataFrame(), msg, solver.WallTime())
+                           pd.DataFrame(), msg, solver.WallTime(), None)
 
-    # ---- แปลงคำตอบเป็นตาราง -------------------------------------------
     rows = []
     for (i, j, t), var in x.items():
         if solver.Value(var) == 1:
@@ -240,21 +238,9 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
                 "End": t + tasks[j].duration,
                 "Duration": tasks[j].duration,
             })
-    schedule = pd.DataFrame(rows).sort_values(["Start", "Worker"]).reset_index(drop=True)
+    schedule = pd.DataFrame(rows).sort_values(["Start", "Worker", "Task"]).reset_index(drop=True)
 
-    # Cmax ที่รายงานคำนวณจากเวลาเสร็จจริงของตาราง ไม่ใช้ค่าตัวแปร cmax โดยตรง
-    # เพราะในโหมด Workload Only ไม่มี Objective ใดกดตัวแปร cmax ลง
-    # ตัวแปรจึงอาจมีค่าใดก็ได้ระหว่างเวลาเสร็จจริงถึง T
-    cmax_value = int(schedule["End"].max())
-
-    # ความเหมาะสมที่สุดของคำตอบ: OPTIMAL = พิสูจน์แล้ว (gap = 0)
-    # FEASIBLE = หมดเวลาก่อนพิสูจน์ คำตอบอาจยังไม่ใช่ค่าที่ดีที่สุด
-    obj_value = solver.ObjectiveValue()
-    best_bound = solver.BestObjectiveBound()
-    if status == cp_model.OPTIMAL:
-        gap_pct = 0.0
-    else:
-        gap_pct = round(abs(obj_value - best_bound) / max(1.0, abs(obj_value)) * 100, 2)
+    cmax_value = int(solver.Value(cmax))
     workload = (
         schedule.groupby("Worker")
         .agg(Tasks=("Task", "count"), BusyMinutes=("Duration", "sum"))
@@ -268,6 +254,14 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
         workload["BusyMinutes"] / cmax_value * 100
     ).round(1) if cmax_value > 0 else 0.0
 
+    # The objective may be weighted, so report the gap on the actual CP-SAT
+    # objective value rather than pretending it is a pure Cmax gap.
+    obj = float(solver.ObjectiveValue())
+    bound = float(solver.BestObjectiveBound())
+    gap_pct = 0.0 if status_name == "OPTIMAL" else (
+        abs(obj - bound) / max(1.0, abs(obj)) * 100.0
+    )
+
     return SolveResult(
         status=status_name,
         feasible=True,
@@ -275,34 +269,83 @@ def solve_model(data: ProblemData, max_seconds: float = 30.0) -> SolveResult:
         buffer=T - cmax_value,
         schedule=schedule,
         workload=workload,
-        message="" if status == cp_model.OPTIMAL else
-                "คำตอบยังไม่ได้รับการพิสูจน์ว่าเหมาะสมที่สุด (FEASIBLE) — ดู Gap %",
+        message="",
         solve_time=solver.WallTime(),
-        best_bound=best_bound,
-        gap_pct=gap_pct,
+        gap_pct=round(gap_pct, 3),
+        max_balance_load=int(solver.Value(max_load)),
     )
 
 
-def compare_scenarios(build_fn, scenarios: List[str], max_seconds: float = 20.0) -> pd.DataFrame:
+def solve_best_variant(build_fn, variants, max_seconds: float = 20.0):
     """
-    build_fn(scenario) -> ProblemData
-    คืนตารางเปรียบเทียบผลของแต่ละ Scenario
+    Solve a small family of policy variants and choose lexicographically by
+    (Cmax, maximum balanced-worker load, variant value).
+
+    Used for S2/S3 to avoid treating the Service-workload lower bound as a
+    fixed team size.  Returns (best_variant, best_data, best_result, table).
     """
     rows = []
-    for s in scenarios:
-        data = build_fn(s)
+    best = None
+    for v in variants:
+        data = build_fn(v)
         res = solve_model(data, max_seconds=max_seconds)
         rows.append({
-            "Scenario": s,
-            "Workers": len(data.workers),
-            "Tasks": len(data.tasks),
-            "T (min)": data.T,
-            "Cmax": res.cmax if res.feasible else None,
-            "Buffer": res.buffer if res.feasible else None,
+            "Variant": v,
+            "Cmax": res.cmax,
+            "Max Balanced Load": res.max_balance_load,
             "Status": res.status,
             "Feasible": res.feasible,
-            "Best Bound": res.best_bound,
-            "Gap %": res.gap_pct,
-            "Solve Time (s)": round(res.solve_time, 2),
+            "Solve Time (s)": round(res.solve_time, 3),
         })
-    return pd.DataFrame(rows)
+        if not res.feasible:
+            continue
+        key = (res.cmax, res.max_balance_load if res.max_balance_load is not None else 10**9, v)
+        if best is None or key < best[0]:
+            best = (key, v, data, res)
+    if best is None:
+        return None, None, None, pd.DataFrame(rows)
+    return best[1], best[2], best[3], pd.DataFrame(rows)
+
+
+def find_min_workers(build_fn, m_min: int, m_max: int = 30,
+                     max_seconds: float = 20.0):
+    """
+    Try workforce sizes in ascending order.
+
+    The first feasible workforce is a PROVEN minimum only if every smaller
+    tested workforce was proven INFEASIBLE.  UNKNOWN at a smaller workforce
+    means the returned workforce is merely the smallest feasible one found
+    within the time limit.
+
+    build_fn(m) may return either ProblemData or a tuple (ProblemData, SolveResult).
+    """
+    rows = []
+    best_m = None
+    best_res = None
+    uncertain_below = False
+    for m in range(max(1, int(m_min)), int(m_max) + 1):
+        built = build_fn(m)
+        if isinstance(built, tuple) and len(built) == 2:
+            data, res = built
+        else:
+            data = built
+            res = solve_model(data, max_seconds=max_seconds)
+
+        if res.status not in ("INFEASIBLE",) and not res.feasible:
+            uncertain_below = True
+
+        row = {
+            "Workers": m,
+            "Cmax": res.cmax,
+            "Status": res.status,
+            "Feasible": res.feasible,
+            "Solve Time (s)": round(res.solve_time, 3),
+            "Minimum Proven": False,
+        }
+        rows.append(row)
+        if res.feasible:
+            best_m, best_res = m, res
+            row["Minimum Proven"] = not uncertain_below
+            break
+    return best_m, best_res, pd.DataFrame(rows)
+
