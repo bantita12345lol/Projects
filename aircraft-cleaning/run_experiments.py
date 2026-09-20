@@ -48,7 +48,7 @@ from aircraft_data import (
     build_precedence,
     build_scenario_workers,
     build_tasks,
-    minimum_total_workers_for_scenario,
+    minimum_total_workers_for_policy,
     required_service_workers,
     service_worker_count_options,
     scenario_settings,
@@ -104,7 +104,7 @@ def make_problem_from_tasks(aircraft, tasks, n_workers, T, scenario="S1",
     )
 
 
-def solve_scenario(aircraft, n_workers, T, scenario="S1", enforce_T=True,
+def solve_policy(aircraft, n_workers, T, scenario="S1", enforce_T=True,
                  objective="Time + Workload", follow_lag=DEFAULT_FOLLOW_LAG,
                  hygiene=True, cleaning=DEFAULT_CLEANING_TYPE,
                  factor=DEFAULT_DURATION_FACTOR, extra_kinds=()):
@@ -154,13 +154,13 @@ def solve_scenario(aircraft, n_workers, T, scenario="S1", enforce_T=True,
 
 
 def run(aircraft, n_workers, T, scenario="S1", enforce_T=True, **kw):
-    data, res, _ = solve_scenario(aircraft, n_workers, T, scenario, enforce_T, **kw)
+    data, res, _ = solve_policy(aircraft, n_workers, T, scenario, enforce_T, **kw)
     return {
         "Aircraft": aircraft,
         "Scenario": scenario,
         "Workers": n_workers,
-        "Cleaning Workers": len([w for w in data.workers if w != "DEICE1"]),
-        "Deicing Resource": int("DEICE1" in data.workers),
+        "Cleaning Workers": len([w for w in data.workers if w != "DEICE_TEAM"]),
+        "Deicing Resource": int("DEICE_TEAM" in data.workers),
         "Service Workers": data.service_worker_count,
         "Tasks": len(data.tasks),
         "T (min)": T,
@@ -176,7 +176,7 @@ def run(aircraft, n_workers, T, scenario="S1", enforce_T=True, **kw):
 def lower_bound_start(aircraft, T, scenario, cleaning=DEFAULT_CLEANING_TYPE,
                       factor=DEFAULT_DURATION_FACTOR, extra_kinds=()):
     tasks = build_tasks_for_case(aircraft, scenario, cleaning, factor, extra_kinds)
-    return minimum_total_workers_for_scenario(tasks, T, scenario)
+    return minimum_total_workers_for_policy(tasks, T, scenario)
 
 
 def min_workers(aircraft, T, scenario="S1", m_max=30, **kw):
@@ -186,7 +186,7 @@ def min_workers(aircraft, T, scenario="S1", m_max=30, **kw):
                               kw.get("extra_kinds", ()))
 
     def solve_m(m):
-        data, res, _ = solve_scenario(aircraft, m, T, scenario, True, **kw)
+        data, res, _ = solve_policy(aircraft, m, T, scenario, True, **kw)
         return data, res
 
     m, res, table = find_min_workers(
@@ -220,7 +220,7 @@ def lagged_chain(durations, lag):
 def verification() -> pd.DataFrame:
     rows = []
     T_ONLY = dict(objective="Time Only")
-    base_data, _, _ = solve_scenario("A320-200", 1, 60, "S1", enforce_T=False, **T_ONLY)
+    base_data, _, _ = solve_policy("A320-200", 1, 60, "S1", enforce_T=False, **T_ONLY)
     tasks = base_data.tasks
     dur = {t.id: t.duration for t in tasks}
     zones = sorted({t.zone for t in tasks if t.zone.startswith("Z")})
@@ -256,7 +256,7 @@ def verification() -> pd.DataFrame:
         "Purpose": "Cmax <= T",
     })
 
-    data, res, _ = solve_scenario("A320-200", 4, 30, "S2", objective="Time Only")
+    data, res, _ = solve_policy("A320-200", 4, 30, "S2", objective="Time Only")
     ok_overlap = ok_prec = ok_cap = ok_hyg = False
     if res.feasible:
         sch = res.schedule.set_index("Task")
@@ -317,15 +317,15 @@ def verification() -> pd.DataFrame:
         "Expected": "B1 finishes before A1 for same worker",
         "Actual": order,
         "Pass": bool(order),
-        "Purpose": "conditional hygiene scenario",
+        "Purpose": "conditional hygiene policy",
     })
 
-    # Structural verification of Service-worker sizing: LB is not treated as fixed.
+    # Structural verification of Service-team sizing: LB is not treated as fixed.
     ts = build_tasks_for_case("A330-300", "S2")
     lb = required_service_workers(ts, 30, "S2")
     opts = service_worker_count_options(ts, 30, "S2", 7)
     rows.append({
-        "Test": "V7 Service worker LB is expandable",
+        "Test": "V7 Service team LB is expandable",
         "Expected": f"options start at LB={lb} and include larger values",
         "Actual": str(opts),
         "Pass": bool(opts and opts[0] == lb and len(opts) > 1),
