@@ -1,18 +1,13 @@
 """
 app.py
 ------------------------------------------------------------------
-Aircraft Cleaning Optimization — IE Research Dashboard
+Aircraft Cleaning Optimization — research dashboard
 
-Run locally
-    python -m streamlit run app.py
-
-Deploy on Streamlit Community Cloud
-    Main file path: app.py
-
-Notes
-    - No external Excel input is required.
-    - Optimization logic remains in solver.py / aircraft_data.py.
-    - This file focuses on research-dashboard presentation and interaction.
+Design intent
+- S1/S2 are the normal-condition cleaning scenarios.
+- S3 is a separate Winter De-icing Extension.
+- Main model uses Normal/Clear weather and baseline task times only.
+- Task times are literature-calibrated assumptions when field data are unavailable.
 """
 
 from __future__ import annotations
@@ -28,1291 +23,756 @@ from aircraft_data import (
     CLEANING_TYPES,
     DEFAULT_AIRCRAFT,
     DEFAULT_CLEANING_TYPE,
-    DEFAULT_WEATHER,
+    DEFAULT_DURATION_FACTOR,
+    DEFAULT_FOLLOW_LAG,
+    MODEL_ASSUMPTIONS,
+    QUICK_TRANSIT,
+    QUICK_TRANSIT_OPTIONAL,
     SCENARIOS,
-    SCOPE_MAPPING,
     TASK_KIND_LABEL,
-    WEATHER_FACTOR,
-    WEATHER_REASON,
-    SERVICE_TASK_KINDS,
-    SERVICE_WORKLOAD_LIMIT,
-    required_service_workers,
     Task,
-    build_blocking,
     build_capability,
     build_precedence,
-    build_tasks,
-    build_workers,
     build_scenario_workers,
+    build_tasks,
+    cleaning_kinds,
+    cleaning_time_window,
+    minimum_total_workers_for_policy,
+    required_service_workers,
+    service_worker_count_options,
+    service_workload_minutes,
     scenario_settings,
 )
-from solver import ProblemData, compare_scenarios, solve_model
+from solver import ProblemData, find_min_workers, solve_best_variant, solve_model
 
+st.set_page_config(page_title="Aircraft Cleaning Optimization", page_icon="✈️", layout="wide")
 
-# ==================================================================
-# Page configuration / visual theme
-# ==================================================================
-st.set_page_config(
-    page_title="Aircraft Cleaning Optimization",
-    page_icon="✈️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.markdown(
-    """
-    <style>
-        .block-container {
-            max-width: 1500px;
-            padding-top: 1.4rem;
-            padding-bottom: 2.5rem;
-        }
-        [data-testid="stSidebar"] {
-            border-right: 1px solid #e5e7eb;
-        }
-        [data-testid="stMetric"] {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-            padding: 14px 16px;
-            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-        }
-        [data-testid="stMetricLabel"] {
-            font-weight: 600;
-        }
-        .research-header {
-            padding: 20px 24px;
-            border: 1px solid #dbe3ee;
-            border-radius: 16px;
-            background: linear-gradient(135deg, #f8fafc 0%, #eef4fb 100%);
-            margin-bottom: 14px;
-        }
-        .research-header h1 {
-            margin: 0;
-            font-size: 1.9rem;
-            line-height: 1.2;
-            color: #0f172a;
-        }
-        .research-header p {
-            margin: 8px 0 0 0;
-            color: #475569;
-            font-size: 0.98rem;
-        }
-        .section-note {
-            padding: 10px 13px;
-            background: #f8fafc;
-            border-left: 4px solid #334155;
-            border-radius: 6px;
-            color: #475569;
-            margin: 4px 0 14px 0;
-        }
-        div[data-testid="stDataFrame"] {
-            border: 1px solid #e5e7eb;
-            border-radius: 10px;
-            overflow: hidden;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# Stable colors by task type. The same task type keeps the same color
-# across workers, zones and experimental runs.
 KIND_COLORS = {
-    "C1": "#4E79A7",   # Trash Collection
-    "C2": "#59A14F",   # Vacuum
-    "C3": "#F28E2B",   # Cosmetic
-    "D": "#E15759",    # Seat Area Wipe
-    "E": "#76B7B2",    # Surface Cleaning
-    "F": "#EDC948",    # Amenity Setup
-    "LAV": "#B07AA1",  # Lavatory
-    "GAL": "#FF9DA7",  # Galley
-    "OVH": "#9C755F",  # Overhead Bin
-    "FD": "#BAB0AC",   # Flight Deck
-    "CR": "#2F4B7C",   # Crew Cabin
-    "RC": "#7A5195",   # Recheck
-    "DEI": "#00A6A6",  # Aircraft De-icing
+    "C1": "#4E79A7", "C2": "#59A14F", "C3": "#F28E2B", "D": "#E15759",
+    "E": "#76B7B2", "F": "#EDC948", "LAV": "#B07AA1", "GAL": "#FF9DA7",
+    "OVH": "#9C755F", "FD": "#BAB0AC", "CR": "#2F4B7C", "RC": "#7A5195",
+    "DEI": "#00A6A6",
+}
+MODE_TH = {
+    "schedule": "หาตารางงานจากจำนวนพนักงานที่กำหนด",
+    "min_workers": "หาจำนวนพนักงานน้อยที่สุดที่เสร็จภายใน T",
 }
 
 
-# ==================================================================
-# Display helpers
-# ==================================================================
-def worker_display_name(worker_id: str) -> str:
-    """Convert internal worker IDs into readable dashboard labels."""
-    worker_id = str(worker_id).strip()
-    if worker_id == "DEICE1":
-        return "DEICE1 — พนักงาน De-icing"
-    if worker_id.startswith("M") and worker_id[1:].isdigit():
-        return f"{worker_id} — พนักงานคนที่ {int(worker_id[1:])}"
-    return worker_id
+def worker_name(w: str) -> str:
+    if w == "DEICE_TEAM":
+        return "DEICE_TEAM — ทีม De-icing"
+    if w.startswith("M") and w[1:].isdigit():
+        return f"{w} — พนักงานคนที่ {int(w[1:])}"
+    return w
 
 
-def kind_display_name(kind: str) -> str:
-    """Convert C1/C2/LAV/... to the full task-type label."""
-    kind = str(kind).strip()
-    return TASK_KIND_LABEL.get(kind, kind)
+def zone_name(z: str, aircraft: str) -> str:
+    for zid, name, seats in AIRCRAFT_LIBRARY[aircraft]["zones"]:
+        if z == zid:
+            return f"{name} ({seats} ที่นั่ง)"
+    return {
+        "LAV": "Lavatory", "GAL": "Galley", "CREW": "Crew Area",
+        "CHECK": "Final Check", "DEICE": "De-icing Area",
+    }.get(z, z)
 
 
-def zone_display_name(zone: str, aircraft_name: str) -> str:
-    """Convert Z1/Z2/... into the real aircraft work-unit name."""
-    zone = str(zone).strip()
-    spec = AIRCRAFT_LIBRARY.get(aircraft_name, {})
-
-    for z_id, z_name, _seats in spec.get("zones", []):
-        if z_id == zone:
-            return f"{z_name} ({z_id})"
-
-    service_zone_names = {
-        "LAV": "Lavatory Area",
-        "GAL": "Galley Area",
-        "CREW": "Crew / Flight Deck Area",
-        "CHECK": "Final Inspection Area",
-        "DEICE": "Aircraft Exterior / De-icing Area",
-    }
-    return service_zone_names.get(zone, zone)
-
-
-def task_display_name(row) -> str:
-    """Prefer the real task name, falling back to Task ID."""
-    name = str(row.get("TaskName", "")).strip()
-    task_id = str(row.get("Task", "")).strip()
-    return name if name else task_id
-
-
-def task_lookup(tasks: list[Task]) -> dict[str, Task]:
-    return {t.id: t for t in tasks}
-
-
-def tasks_to_df(tasks: list[Task], aircraft_name: str) -> pd.DataFrame:
-    """Editable task table plus readable research labels."""
-    return pd.DataFrame([
-        {
-            "เลือก": True,
-            "Task ID": t.id,
-            "ประเภท": t.kind,
-            "ประเภทงานจริง": kind_display_name(t.kind),
-            "Zone": t.zone,
-            "Work Unit / Zone จริง": zone_display_name(t.zone, aircraft_name),
-            "ชื่องาน": t.name,
-            "d_j (นาที)": t.duration,
-        }
-        for t in tasks
-    ])
+def tasks_to_df(tasks: list[Task], aircraft: str) -> pd.DataFrame:
+    return pd.DataFrame([{
+        "เลือก": True,
+        "Task ID": t.id,
+        "ประเภท": t.kind,
+        "ประเภทงานจริง": TASK_KIND_LABEL.get(t.kind, t.kind),
+        "Zone": t.zone,
+        "Work Unit / Zone จริง": zone_name(t.zone, aircraft),
+        "ชื่องาน": t.name,
+        "d_j (นาที)": t.duration,
+    } for t in tasks])
 
 
 def df_to_tasks(df: pd.DataFrame) -> list[Task]:
-    tasks: list[Task] = []
+    out: list[Task] = []
     for _, r in df.iterrows():
         if not bool(r.get("เลือก", True)):
             continue
-
-        tid = str(r.get("Task ID", "")).strip()
-        if not tid:
-            continue
-
         try:
-            dur = int(r.get("d_j (นาที)", 0))
-        except (TypeError, ValueError):
+            duration = int(r["d_j (นาที)"])
+        except Exception:
             continue
-        if dur <= 0:
+        if duration <= 0:
             continue
-
-        tasks.append(Task(
-            id=tid,
-            kind=str(r.get("ประเภท", "C1")).strip() or "C1",
-            zone=str(r.get("Zone", "Z1")).strip() or "Z1",
-            name=str(r.get("ชื่องาน", tid)).strip() or tid,
-            duration=dur,
+        out.append(Task(
+            str(r["Task ID"]), str(r["ประเภท"]), str(r["Zone"]),
+            str(r["ชื่องาน"]), duration,
         ))
-    return tasks
-
-
-def refresh_task_labels(df: pd.DataFrame, aircraft_name: str) -> pd.DataFrame:
-    """Refresh readable columns after a user edits task type or zone."""
-    out = df.copy()
-    if "ประเภท" in out.columns:
-        out["ประเภทงานจริง"] = out["ประเภท"].map(kind_display_name)
-    if "Zone" in out.columns:
-        out["Work Unit / Zone จริง"] = out["Zone"].map(
-            lambda z: zone_display_name(z, aircraft_name)
-        )
     return out
 
 
-def skill_matrix_df(
-    workers: list[str],
-    tasks: list[Task],
-    zone_based: bool,
-    dedicated_deicing_worker: str | None = None,
-) -> pd.DataFrame:
+def skill_matrix_df(workers: list[str], tasks: list[Task], zone_based: bool,
+                    dedicated: str | None, service_count: int = 0) -> pd.DataFrame:
     a = build_capability(
-        workers,
-        tasks,
-        zone_based=zone_based,
-        dedicated_deicing_worker=dedicated_deicing_worker,
+        workers, tasks, zone_based=zone_based,
+        service_worker_count=service_count,
+        dedicated_deicing_worker=dedicated,
     )
     data = {"พนักงาน": workers}
     for t in tasks:
-        data[t.id] = [bool(a[(i, t.id)]) for i in workers]
+        data[t.id] = [bool(a.get((w, t.id), 0)) for w in workers]
     return pd.DataFrame(data)
 
 
 def df_to_capability(df: pd.DataFrame, tasks: list[Task]) -> dict:
-    a = {}
+    out = {}
     for _, r in df.iterrows():
-        worker = str(r["พนักงาน"])
+        w = str(r["พนักงาน"])
         for t in tasks:
-            a[(worker, t.id)] = 1 if bool(r.get(t.id, True)) else 0
-    return a
+            out[(w, t.id)] = 1 if bool(r.get(t.id, False)) else 0
+    return out
 
 
-def enforce_dedicated_deicing_worker(
-    a: dict,
-    workers: list[str],
-    tasks: list[Task],
-    dedicated_worker: str | None,
-) -> dict:
-    """
-    บังคับกฎ S5 หลังอ่าน Skill Matrix จากหน้าเว็บ:
-    DEICE1 ทำได้เฉพาะ DEI1/งานประเภท DEI และ Cleaner คนอื่นทำ DEI ไม่ได้
-    เพื่อไม่ให้ผู้ใช้เผลอแก้ checkbox แล้วทำลายเงื่อนไขของ Scenario S5
-    """
-    if dedicated_worker is None:
-        return a
-
-    for i in workers:
-        for t in tasks:
-            if i == dedicated_worker:
-                a[(i, t.id)] = 1 if t.kind == "DEI" else 0
-            elif t.kind == "DEI":
-                a[(i, t.id)] = 0
-    return a
+def capability_to_df(data: ProblemData) -> pd.DataFrame:
+    rows = []
+    for w in data.workers:
+        row = {"Worker": w}
+        for t in data.tasks:
+            row[t.id] = data.a.get((w, t.id), 0)
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
-def enforce_service_worker_rule(
-    a: dict,
-    workers: list[str],
-    tasks: list[Task],
-    zone_based: bool,
-    dedicated_worker: str | None = None,
-) -> dict:
-    """
-    บังคับ capability สำหรับงาน LAV/GAL ให้ตรงกับกฎ Service workload
-    แม้ Skill Matrix ใน session เดิมจะยังค้างจากเวอร์ชันก่อนหน้า
-
-    - พนักงาน 1 คนรับ LAV + GAL รวมกันได้ไม่เกิน SERVICE_WORKLOAD_LIMIT นาที
-    - ถ้างานรวมเกิน limit จะต้องมีพนักงาน Service เพิ่มตาม
-      ceil(total_service_work / limit)
-    - ใช้ build_capability เวอร์ชันล่าสุดเป็น source of truth สำหรับ LAV/GAL
-    """
-    auto_a = build_capability(
-        workers,
-        tasks,
-        zone_based=zone_based,
-        dedicated_deicing_worker=dedicated_worker,
+def schedule_display_df(schedule: pd.DataFrame, aircraft: str) -> pd.DataFrame:
+    d = schedule.copy()
+    d["พนักงาน"] = d["Worker"].map(worker_name)
+    d["ประเภทงาน"] = d["Kind"].map(lambda k: TASK_KIND_LABEL.get(k, k))
+    d["พื้นที่"] = d["Zone"].map(lambda z: zone_name(z, aircraft))
+    return d[["พนักงาน", "TaskName", "ประเภทงาน", "พื้นที่", "Task", "Start", "End", "Duration"]].rename(
+        columns={"TaskName": "ชื่องาน", "Task": "Task ID", "Start": "เริ่ม (นาที)",
+                 "End": "เสร็จ (นาที)", "Duration": "เวลา (นาที)"}
     )
-
-    for i in workers:
-        for t in tasks:
-            if t.kind in SERVICE_TASK_KINDS:
-                a[(i, t.id)] = auto_a.get((i, t.id), 0)
-    return a
-
-
-def schedule_display_df(schedule: pd.DataFrame, aircraft_name: str) -> pd.DataFrame:
-    """Readable schedule table for the dashboard and Excel export."""
-    df = schedule.copy()
-    df["พนักงาน"] = df["Worker"].map(worker_display_name)
-    df["ชื่องาน"] = df.apply(task_display_name, axis=1)
-    df["ประเภทงาน"] = df["Kind"].map(kind_display_name)
-    df["Work Unit / Zone"] = df["Zone"].map(
-        lambda z: zone_display_name(z, aircraft_name)
-    )
-    df["Task ID"] = df["Task"]
-
-    return df[[
-        "พนักงาน",
-        "ชื่องาน",
-        "ประเภทงาน",
-        "Work Unit / Zone",
-        "Task ID",
-        "Start",
-        "End",
-        "Duration",
-    ]].rename(columns={
-        "Start": "เริ่ม (นาที)",
-        "End": "เสร็จ (นาที)",
-        "Duration": "ใช้เวลา (นาที)",
-    })
 
 
 def workload_display_df(workload: pd.DataFrame) -> pd.DataFrame:
-    df = workload.copy()
-    if "Worker" in df.columns:
-        df["Worker"] = df["Worker"].map(worker_display_name)
-    return df.rename(columns={
-        "Worker": "พนักงาน",
-        "Tasks": "จำนวนงาน",
-        "BusyMinutes": "เวลาทำงาน (นาที)",
-        "IdleMinutes": "เวลาว่าง (นาที)",
-        "Utilization %": "Utilization (%)",
+    d = workload.copy()
+    d["Worker"] = d["Worker"].map(worker_name)
+    return d.rename(columns={
+        "Worker": "พนักงาน", "Tasks": "จำนวนงาน", "BusyMinutes": "เวลาทำงาน",
+        "IdleMinutes": "เวลาว่าง", "Utilization %": "Utilization (%)",
     })
 
 
-def gantt_chart(
-    schedule: pd.DataFrame,
-    workers: list[str],
-    T: int,
-    cmax: int,
-    aircraft_name: str,
-) -> go.Figure:
-    """
-    Research-style Gantt chart.
-
-    - Y axis: worker name
-    - Bar label: actual task name
-    - Color: task type (Kind)
-    - Hover: worker, task, zone, task ID and timing
-    """
-    plot_df = schedule.copy()
-    plot_df["WorkerDisplay"] = plot_df["Worker"].map(worker_display_name)
-    plot_df["TaskDisplay"] = plot_df.apply(task_display_name, axis=1)
-    plot_df["KindDisplay"] = plot_df["Kind"].map(kind_display_name)
-    plot_df["ZoneDisplay"] = plot_df["Zone"].map(
-        lambda z: zone_display_name(z, aircraft_name)
-    )
-
-    # Sort by model worker order then start time for stable presentation.
-    worker_rank = {w: idx for idx, w in enumerate(workers)}
-    plot_df["_worker_rank"] = plot_df["Worker"].map(worker_rank)
-    plot_df = plot_df.sort_values(["_worker_rank", "Start", "End"])
-
+def gantt_chart(schedule: pd.DataFrame, workers: list[str], T: int, cmax: int) -> go.Figure:
     fig = go.Figure()
-
-    # One trace per task kind = one stable legend entry/color per task type.
-    ordered_kinds = [k for k in TASK_KIND_LABEL if k in set(plot_df["Kind"])]
-    extra_kinds = [k for k in plot_df["Kind"].unique() if k not in ordered_kinds]
-
-    for kind in ordered_kinds + extra_kinds:
-        sub = plot_df[plot_df["Kind"] == kind]
-        if sub.empty:
-            continue
-
-        color = KIND_COLORS.get(kind, "#64748B")
-        legend_label = kind_display_name(kind)
-
+    plot = schedule.copy()
+    plot["WorkerDisplay"] = plot.Worker.map(worker_name)
+    for kind in plot.Kind.unique():
+        sub = plot[plot.Kind == kind]
         fig.add_trace(go.Bar(
-            y=sub["WorkerDisplay"],
-            x=sub["Duration"],
-            base=sub["Start"],
-            orientation="h",
-            name=legend_label,
-            marker=dict(
-                color=color,
-                line=dict(color="rgba(15,23,42,0.28)", width=0.7),
-            ),
-            text=sub["TaskDisplay"],
-            textposition="inside",
-            insidetextanchor="middle",
-            textfont=dict(size=11, color="white"),
-            customdata=sub[[
-                "Task",
-                "TaskDisplay",
-                "KindDisplay",
-                "ZoneDisplay",
-                "Start",
-                "End",
-                "Duration",
-            ]],
+            y=sub.WorkerDisplay, x=sub.Duration, base=sub.Start, orientation="h",
+            name=TASK_KIND_LABEL.get(kind, kind), marker_color=KIND_COLORS.get(kind, "#64748B"),
+            text=sub.TaskName, textposition="inside",
+            customdata=sub[["Task", "Start", "End"]],
             hovertemplate=(
-                "<b>%{customdata[1]}</b>"
-                "<br>พนักงาน: %{y}"
-                "<br>ประเภทงาน: %{customdata[2]}"
-                "<br>Work Unit / Zone: %{customdata[3]}"
-                "<br>Task ID: %{customdata[0]}"
-                "<br>เริ่ม: %{customdata[4]} นาที"
-                "<br>เสร็จ: %{customdata[5]} นาที"
-                "<br>ระยะเวลา: %{customdata[6]} นาที"
-                "<extra></extra>"
+                "<b>%{text}</b><br>Task %{customdata[0]}"
+                "<br>Start %{customdata[1]}<br>End %{customdata[2]}<extra></extra>"
             ),
         ))
-
-    # Completion and turnaround reference lines.
-    fig.add_vline(
-        x=cmax,
-        line_dash="dash",
-        line_width=2,
-        line_color="#111827",
-        annotation_text=f"Cmax = {cmax} min",
-        annotation_position="top",
-    )
-    fig.add_vline(
-        x=T,
-        line_dash="dot",
-        line_width=2,
-        line_color="#C2410C",
-        annotation_text=f"Turnaround T = {T} min",
-        annotation_position="top right",
-    )
-
-    worker_order = [worker_display_name(w) for w in workers]
-    xmax = max(T, cmax, int(plot_df["End"].max()) if not plot_df.empty else 0)
-
+    fig.add_vline(x=cmax, line_dash="dash", annotation_text=f"Cmax={cmax}")
+    fig.add_vline(x=T, line_dash="dot", annotation_text=f"T={T}")
     fig.update_layout(
-        title={
-            "text": "Optimized Aircraft Cleaning Schedule",
-            "x": 0.01,
-            "xanchor": "left",
-            "font": {"size": 18},
-        },
-        barmode="overlay",
-        bargap=0.28,
-        height=max(440, 82 * len(workers) + 190),
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        xaxis_title="Time from aircraft arrival (minutes)",
-        yaxis_title="Assigned worker",
-        yaxis=dict(
-            categoryorder="array",
-            categoryarray=list(reversed(worker_order)),
-            automargin=True,
-            showgrid=False,
-        ),
-        xaxis=dict(
-            range=[0, xmax + 2],
-            dtick=5,
-            showgrid=True,
-            gridcolor="#E5E7EB",
-            zeroline=False,
-        ),
-        legend=dict(
-            title="Task type",
-            orientation="h",
-            yanchor="bottom",
-            y=1.08,
-            xanchor="left",
-            x=0,
-            bgcolor="rgba(255,255,255,0.85)",
-        ),
-        hoverlabel=dict(namelength=-1),
-        margin=dict(l=20, r=20, t=115, b=30),
-        uniformtext_minsize=9,
-        uniformtext_mode="hide",
+        barmode="overlay", height=max(420, 70 * len(workers) + 140),
+        xaxis_title="เวลา (นาที)", yaxis_title="ทรัพยากร/พนักงาน",
+        legend_title="ประเภทงาน", margin=dict(l=10, r=10, t=60, b=10),
     )
     return fig
 
 
 def workload_chart(workload: pd.DataFrame) -> go.Figure:
-    df = workload.copy()
-    df["WorkerDisplay"] = df["Worker"].map(worker_display_name)
-
+    d = workload.copy()
+    d["WorkerDisplay"] = d.Worker.map(worker_name)
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=df["WorkerDisplay"],
-        y=df["BusyMinutes"],
-        name="Busy time",
-        marker_color="#4E79A7",
-        text=df["BusyMinutes"],
-        textposition="outside",
-        hovertemplate="%{x}<br>Busy time: %{y} min<extra></extra>",
-    ))
-    fig.add_trace(go.Bar(
-        x=df["WorkerDisplay"],
-        y=df["IdleMinutes"],
-        name="Idle time",
-        marker_color="#D1D5DB",
-        hovertemplate="%{x}<br>Idle time: %{y} min<extra></extra>",
-    ))
-    fig.update_layout(
-        barmode="stack",
-        height=360,
-        title="Worker Utilization within Cmax",
-        xaxis_title="Worker",
-        yaxis_title="Minutes",
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        yaxis=dict(showgrid=True, gridcolor="#E5E7EB", zeroline=False),
-        xaxis=dict(showgrid=False),
-        legend=dict(orientation="h", y=1.08, x=0),
-        margin=dict(l=15, r=15, t=80, b=20),
-    )
+    fig.add_trace(go.Bar(x=d.WorkerDisplay, y=d.BusyMinutes, name="Busy"))
+    fig.add_trace(go.Bar(x=d.WorkerDisplay, y=d.IdleMinutes, name="Idle"))
+    fig.update_layout(barmode="stack", height=350, yaxis_title="นาที")
     return fig
 
 
-def scenario_chart(table: pd.DataFrame, T: int) -> go.Figure:
-    ok = table.dropna(subset=["Cmax"]).copy()
-    fig = go.Figure(go.Bar(
-        x=ok["Scenario"],
-        y=ok["Cmax"],
-        text=ok["Cmax"].astype(int),
-        textposition="outside",
-        marker_color="#4E79A7",
-        customdata=ok[["Workers", "Tasks", "Buffer", "Status"]],
-        hovertemplate=(
-            "Scenario %{x}"
-            "<br>Cmax: %{y} min"
-            "<br>Workers: %{customdata[0]}"
-            "<br>Tasks: %{customdata[1]}"
-            "<br>Buffer: %{customdata[2]} min"
-            "<br>Status: %{customdata[3]}<extra></extra>"
-        ),
-    ))
-    fig.add_hline(
-        y=int(T),
-        line_dash="dot",
-        line_color="#C2410C",
-        annotation_text=f"Turnaround T = {T}",
-    )
-    fig.update_layout(
-        title="Scenario Comparison by Makespan (Cmax)",
-        yaxis_title="Cmax (minutes)",
-        xaxis_title="Scenario",
-        height=400,
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        yaxis=dict(showgrid=True, gridcolor="#E5E7EB", zeroline=False),
-        margin=dict(l=15, r=15, t=65, b=20),
-    )
+def compare_chart(table: pd.DataFrame, T: int) -> go.Figure:
+    fig = go.Figure()
+    for s in table.Scenario.unique():
+        d = table[table.Scenario == s]
+        fig.add_trace(go.Scatter(x=d.Workers, y=d.Cmax, mode="lines+markers", name=s))
+    fig.add_hline(y=T, line_dash="dot", annotation_text=f"T={T}")
+    fig.update_layout(xaxis_title="จำนวนทรัพยากรรวม", yaxis_title="Cmax (นาที)", height=420)
     return fig
 
 
 def to_excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
     buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
         for name, df in sheets.items():
-            df.to_excel(writer, sheet_name=name[:31], index=False)
+            df.to_excel(w, sheet_name=name[:31], index=False)
     return buf.getvalue()
 
 
-# ==================================================================
-# Sidebar — experimental inputs
-# ==================================================================
-st.sidebar.title("⚙️ Experimental Settings")
-st.sidebar.caption("กำหนดข้อมูลนำเข้าและเงื่อนไขของตัวแบบ")
+def status_th(status: str) -> str:
+    return {
+        "OPTIMAL": "คำตอบเหมาะที่สุด",
+        "FEASIBLE": "พบคำตอบที่เป็นไปได้",
+        "INFEASIBLE": "พิสูจน์ว่าไม่มีคำตอบที่เป็นไปได้",
+        "UNKNOWN": "ยังสรุปไม่ได้ภายในเวลาคำนวณ",
+    }.get(status, status)
 
-st.sidebar.subheader("1) Aircraft & Environment")
-aircraft_names = list(AIRCRAFT_LIBRARY.keys())
+
+# ==================================================================
+# Sidebar
+# ==================================================================
+st.sidebar.title("⚙️ ตั้งค่าการทดลอง")
+
+st.sidebar.subheader("1) อากาศยานและรูปแบบงาน")
+aircraft_names = list(AIRCRAFT_LIBRARY)
 aircraft = st.sidebar.selectbox(
-    "ประเภทอากาศยาน",
-    aircraft_names,
+    "ประเภทอากาศยาน", aircraft_names,
     index=aircraft_names.index(DEFAULT_AIRCRAFT),
 )
 spec = AIRCRAFT_LIBRARY[aircraft]
 st.sidebar.caption(
-    f"{spec['category']} · {spec['seats']} seats · "
-    f"{len(spec['zones'])} work units · LAV {spec['n_lav']} · GAL {spec['n_gal']}"
+    f"{spec['seats']} ที่นั่ง · {len(spec['zones'])} โซน · "
+    f"ห้องน้ำ {spec['n_lav']} · ครัว {spec['n_gal']} · "
+    f"{spec['seats_abreast']} ที่นั่ง/แถว (สมมติฐาน)"
 )
+st.sidebar.caption("Aircraft configuration เป็นค่าที่กำหนดสำหรับการศึกษา ไม่ใช่ layout เฉพาะสายการบิน")
 
-cleaning_options = list(CLEANING_TYPES.keys())
 cleaning_type = st.sidebar.selectbox(
-    "รูปแบบการทำความสะอาด",
-    cleaning_options,
-    index=cleaning_options.index(DEFAULT_CLEANING_TYPE),
+    "รูปแบบการทำความสะอาด", list(CLEANING_TYPES),
+    index=list(CLEANING_TYPES).index(DEFAULT_CLEANING_TYPE),
 )
+if cleaning_type == QUICK_TRANSIT:
+    opt_surface = st.sidebar.checkbox(
+        f"เพิ่มงานพื้นผิว ({QUICK_TRANSIT_OPTIONAL['E']})", False
+    )
+    opt_amenity = st.sidebar.checkbox(
+        f"เพิ่มงาน Amenity ({QUICK_TRANSIT_OPTIONAL['F']})", False
+    )
+else:
+    opt_surface = opt_amenity = False
+active_kinds = cleaning_kinds(cleaning_type, opt_surface, opt_amenity)
 
-weather_options = list(WEATHER_FACTOR.keys())
-weather = st.sidebar.selectbox(
-    "สภาพอากาศ",
-    weather_options,
-    index=weather_options.index(DEFAULT_WEATHER),
-)
-st.sidebar.caption(
-    f"Weather factor γ = {WEATHER_FACTOR[weather]:.2f} · {WEATHER_REASON[weather]}"
-)
+duration_factor = DEFAULT_DURATION_FACTOR
+st.sidebar.caption("สภาพอากาศ: Normal/Clear คงที่ · เวลางานฐาน 100%")
 
-st.sidebar.subheader("2) Workforce & Time")
-
-# อ่าน Scenario ที่เลือกไว้จาก session_state ก่อนถึง widget Scenario ด้านล่าง
-# เพื่อให้ S5 แสดงจำนวนพนักงานรวมเริ่มต้นเป็น 5 คน
-# (Cleaner 4 คน + DEICE1 1 คน) โดยอัตโนมัติ
+st.sidebar.subheader("2) พนักงานและเวลา")
 scenario_hint = st.session_state.get("scenario_selector", "S1")
-is_s5_hint = scenario_hint == "S5"
-worker_widget_key = "n_workers_s5_total" if is_s5_hint else "n_workers_standard"
-default_worker_total = 5 if is_s5_hint else 4
-
+default_workers = {"S1": 4, "S2": 4, "S3": 5}.get(scenario_hint, 4)
 n_workers = st.sidebar.number_input(
-    "จำนวนพนักงานรวม (m)",
-    1,
-    30,
-    default_worker_total,
-    1,
-    key=worker_widget_key,
+    "จำนวนทรัพยากรรวม (m)", 1, 30, default_workers, 1,
+    key=f"workers_{scenario_hint}",
+    help="S3 นับ DEICE_TEAM เป็นทรัพยากรเฉพาะเพิ่ม 1 ทีม ไม่ใช่ Cleaner",
+)
+T = st.sidebar.number_input(
+    "เวลาที่กำหนด T (นาที)", 5, 300, 30, 5,
     help=(
-        "จำนวนพนักงานรวมทั้งหมดของ Scenario นั้น ๆ · สำหรับ S5 จำนวนนี้รวม "
-        "พนักงาน DEICE1 แล้ว เช่น m=5 = Cleaner 4 คน + DEICE1 1 คน"
+        "S1/S2: เวลาจนงาน Cleaning เสร็จ · S3: เวลาจน Winter Extension "
+        "(De-icing) เสร็จ โดย Cleaning ต้องเสร็จก่อน"
     ),
 )
-T = st.sidebar.number_input("Turnaround Time T (นาที)", 5, 300, 30, 5)
 
-st.sidebar.subheader("3) Optimization Policy")
+st.sidebar.subheader("3) นโยบายและข้อจำกัด")
 scenario = st.sidebar.selectbox(
-    "Scenario",
-    list(SCENARIOS.keys()),
+    "Scenario", list(SCENARIOS),
     format_func=lambda s: f"{s} — {SCENARIOS[s]}",
     key="scenario_selector",
 )
-objective_mode = st.sidebar.selectbox(
-    "Objective",
-    ["Time Only", "Time + Workload", "Workload Only"],
-    index=1,
+calc_mode = st.sidebar.radio(
+    "รูปแบบการคำนวณ", list(MODE_TH), format_func=lambda k: MODE_TH[k]
 )
-use_blocking = st.sidebar.checkbox(
-    "ใช้ข้อจำกัด Aisle Blocking (เซต B)",
-    value=True,
+follow_lag = st.sidebar.number_input(
+    "ระยะไล่ตาม k (นาที)", 0, 5, DEFAULT_FOLLOW_LAG, 1,
+    help=(
+        "ค่าเริ่มต้น k=1 เป็นสมมติฐานแทนระยะห่างของ work front ภายใน Zone; "
+        "ควรอ่านร่วมกับ Sensitivity k=0,1,2 ในบทที่ 4"
+    ),
 )
-enforce_T = st.sidebar.checkbox(
-    "บังคับ Cmax ≤ T",
-    value=True,
-    help="ปิดเมื่อต้องการวัดเวลาที่ต้องใช้จริง แม้เกินเวลาจอด",
+use_hygiene = st.sidebar.checkbox(
+    "กฎสุขอนามัย: ครัวก่อนห้องน้ำ", True,
+    help="ใช้เฉพาะกรณีที่พนักงานคนเดียวกันถูกมอบหมายทั้ง Galley และ Lavatory",
 )
-max_seconds = st.sidebar.slider(
-    "Solver time limit (วินาที)",
-    5,
-    120,
-    30,
-    5,
-)
+enforce_T = True if calc_mode == "min_workers" else st.sidebar.checkbox("บังคับ Cmax ≤ T", True)
+max_seconds = st.sidebar.slider("เวลาคำนวณสูงสุดต่อกรณี (วินาที)", 5, 120, 30, 5)
 
-_cfg = scenario_settings(scenario)   # แหล่งกำหนดนโยบาย Scenario จุดเดียว (aircraft_data.py)
-zone_based = _cfg["zone_based"]
-trash_first = _cfg["trash_first"]
-include_deicing = _cfg["include_deicing"]
+cfg = scenario_settings(scenario)
 
-# จำนวนพนักงานที่กรอกบน Sidebar = จำนวนพนักงานรวมทั้งหมด
-# S5 กันพนักงาน 1 คนไว้เป็น DEICE1 จึงเหลือ Cleaner = m - 1
-cleaning_worker_count = int(n_workers) - (1 if include_deicing else 0)
 
-if include_deicing and int(n_workers) < 2:
-    st.sidebar.error(
-        "S5 ต้องมีพนักงานรวมอย่างน้อย 2 คน: Cleaner อย่างน้อย 1 คน + DEICE1 1 คน"
+# ==================================================================
+# Tasks / model builders
+# ==================================================================
+def default_tasks(s: str) -> list[Task]:
+    return build_tasks(
+        aircraft, active_kinds, duration_factor,
+        include_deicing=scenario_settings(s)["include_deicing"],
     )
-    st.stop()
 
 
-# ==================================================================
-# Initialize / reset tasks when major inputs change
-# ==================================================================
-signature = f"{aircraft}|{cleaning_type}|{weather}|deicing={include_deicing}"
+signature = f"{aircraft}|{cleaning_type}|{active_kinds}|normal|{scenario}"
 if st.session_state.get("signature") != signature:
     st.session_state["signature"] = signature
-    st.session_state["tasks_df"] = tasks_to_df(
-        build_tasks(
-            aircraft,
-            CLEANING_TYPES[cleaning_type],
-            weather,
-            include_deicing=include_deicing,
-        ),
-        aircraft,
-    )
-    st.session_state.pop("skill_df", None)
-    st.session_state.pop("skill_key", None)
-    st.session_state.pop("result", None)
-    st.session_state.pop("compare", None)
+    st.session_state["tasks_df"] = tasks_to_df(default_tasks(scenario), aircraft)
+    for key in ("skill_df", "skill_key", "result", "data", "compare", "minw_table", "partition_table"):
+        st.session_state.pop(key, None)
 
-st.sidebar.divider()
-if st.sidebar.button(
-    "↺ Reset tasks from selected aircraft",
-    use_container_width=True,
-):
-    st.session_state["tasks_df"] = tasks_to_df(
-        build_tasks(
-            aircraft,
-            CLEANING_TYPES[cleaning_type],
-            weather,
-            include_deicing=include_deicing,
-        ),
-        aircraft,
+
+def tasks_for_scenario(base_tasks: list[Task], s: str) -> list[Task]:
+    normal = [t for t in base_tasks if t.kind != "DEI"]
+    if not scenario_settings(s)["include_deicing"]:
+        return normal
+    deice = [t for t in default_tasks("S3") if t.kind == "DEI"]
+    return normal + deice
+
+
+def build_problem(tasks: list[Task], m_total: int, s: str,
+                  service_count: int | None = None,
+                  a_override: dict | None = None,
+                  enforce: bool = True) -> ProblemData:
+    c = scenario_settings(s)
+    workers, dedicated = build_scenario_workers(m_total, s)
+    if service_count is None:
+        service_count = required_service_workers(tasks, int(T), s) if c["zone_based"] else 0
+    a = a_override if a_override is not None else build_capability(
+        workers, tasks, zone_based=c["zone_based"],
+        service_worker_count=service_count,
+        dedicated_deicing_worker=dedicated,
     )
-    st.session_state.pop("skill_df", None)
-    st.session_state.pop("skill_key", None)
-    st.session_state.pop("result", None)
-    st.session_state.pop("compare", None)
-    st.rerun()
+    balance_workers = [w for w in workers if w != dedicated]
+    return ProblemData(
+        aircraft=aircraft,
+        workers=workers,
+        tasks=tasks,
+        T=int(T),
+        a=a,
+        P=build_precedence(tasks),
+        follow_lag=int(follow_lag),
+        hygiene_galley_first=use_hygiene,
+        enforce_time_limit=enforce,
+        objective_mode="Time + Workload",
+        scenario=s,
+        balance_workers=balance_workers,
+        service_worker_count=service_count if c["zone_based"] else None,
+    )
+
+
+def solve_policy(tasks: list[Task], m_total: int, s: str,
+                 a_override: dict | None = None,
+                 enforce: bool = True):
+    """Solve one scenario, including an outer search over Service-team size."""
+    c = scenario_settings(s)
+    if not c["zone_based"]:
+        data = build_problem(tasks, m_total, s, service_count=0,
+                             a_override=a_override, enforce=enforce)
+        res = solve_model(data, max_seconds=max_seconds)
+        return data, res, pd.DataFrame([{
+            "Service Workers": 0, "Cmax": res.cmax, "Status": res.status,
+            "Feasible": res.feasible,
+        }])
+
+    options = service_worker_count_options(tasks, int(T), s, m_total)
+    if not options:
+        # Build the lower-bound allocation only so the solver returns a clear infeasible reason.
+        lb = required_service_workers(tasks, int(T), s)
+        data = build_problem(tasks, m_total, s, service_count=lb, enforce=enforce)
+        res = solve_model(data, max_seconds=max_seconds)
+        return data, res, pd.DataFrame([{
+            "Service Workers": lb, "Cmax": res.cmax, "Status": res.status,
+            "Feasible": res.feasible,
+        }])
+
+    best_svc, data, res, table = solve_best_variant(
+        lambda svc: build_problem(tasks, m_total, s, service_count=svc, enforce=enforce),
+        options,
+        max_seconds=max_seconds,
+    )
+    table = table.rename(columns={"Variant": "Service Workers"})
+    if data is None:
+        # retain a representative problem for diagnostics
+        data = build_problem(tasks, m_total, s, service_count=options[0], enforce=enforce)
+        res = solve_model(data, max_seconds=max_seconds)
+    return data, res, table
+
+
+preview_tasks = default_tasks(scenario)
+policy_lb = minimum_total_workers_for_policy(preview_tasks, int(T), scenario)
+if int(n_workers) < policy_lb:
+    st.sidebar.warning(
+        f"Lower Bound ตามนโยบาย = {policy_lb} resources; จำนวนที่กรอกต่ำกว่านี้มีโอกาส Infeasible สูง"
+    )
 
 
 # ==================================================================
-# Main research dashboard header
+# Header
 # ==================================================================
-st.markdown(
-    """
-    <div class="research-header">
-        <h1>✈️ Aircraft Cleaning Optimization</h1>
-        <p>
-            Industrial Engineering Research Dashboard · Time-indexed Binary Optimization · OR-Tools CP-SAT
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-h1, h2, h3, h4 = st.columns([1.1, 1.2, 1.1, 1.1])
-h1.metric("Aircraft", aircraft)
-h2.metric("Cleaning policy", cleaning_type.replace(" - ", "\n"))
-h3.metric("Workforce", f"{int(n_workers)} total")
-h4.metric("Turnaround target", f"{int(T)} min")
-
+st.title("✈️ Aircraft Cleaning Optimization")
 st.caption(
-    f"Experimental condition: {SCENARIOS[scenario]} · Objective = {objective_mode} · "
-    f"Weather = {weather} (γ={WEATHER_FACTOR[weather]:.2f})"
+    "Time-indexed Binary Optimization · OR-Tools CP-SAT · "
+    "Normal/Clear baseline · Literature-calibrated assumptions"
 )
 
-if include_deicing:
+h1, h2, h3, h4 = st.columns(4)
+h1.metric("Aircraft", aircraft)
+h2.metric("Cleaning", cleaning_type)
+h3.metric("Modeled resources", f"{n_workers}")
+h4.metric("T", f"{T} นาที")
+
+if cfg["zone_based"]:
+    svc_lb = required_service_workers(preview_tasks, int(T), scenario)
+    svc_opts = service_worker_count_options(preview_tasks, int(T), scenario, int(n_workers))
     st.info(
-        f"S5 active: จำนวนพนักงานรวม {int(n_workers)} คน = "
-        f"Cleaning {cleaning_worker_count} คน + DEICE1 1 คน · "
-        "DEICE1 ทำเฉพาะ Aircraft De-icing Spray (DEI1) และ DEI1 เริ่มที่นาที 0 · "
-        "Cleaner คนอื่นไม่สามารถทำ DEI1 ได้"
+        f"{scenario}: LAV+GAL workload = {service_workload_minutes(preview_tasks)} นาที · "
+        f"T_clean = {cleaning_time_window(preview_tasks, int(T), scenario)} นาที · "
+        f"Service-team lower bound = {svc_lb} · "
+        f"ระบบจะลอง Service-team sizes = {svc_opts if svc_opts else 'ไม่มีช่วงที่เป็นไปได้'}"
+    )
+if cfg["include_deicing"]:
+    st.warning(
+        "S3 เป็น Winter De-icing Extension ไม่ใช่สภาพ Normal/Clear: "
+        "DEICE_TEAM เป็นทรัพยากรเฉพาะ และเริ่มหลัง Cleaning ทุกงานเสร็จ"
     )
 
+setup, result_tab, gantt_tab, compare_tab, model_tab = st.tabs([
+    "01 · Input & Model Setup",
+    "02 · Optimization Results",
+    "03 · Gantt & Workforce",
+    "04 · Scenario Analysis",
+    "05 · Mathematical Model & Assumptions",
+])
 
-# แสดงกฎกำลังคนสำหรับ Lavatory + Galley
-_service_preview_tasks = build_tasks(
-    aircraft,
-    CLEANING_TYPES[cleaning_type],
-    weather,
-    include_deicing=include_deicing,
-)
-_service_total = sum(t.duration for t in _service_preview_tasks if t.kind in SERVICE_TASK_KINDS)
-_service_workers_required = required_service_workers(_service_preview_tasks)
-if _service_total > 0:
+
+# ==================================================================
+# TAB 01
+# ==================================================================
+with setup:
+    st.subheader("รายการงาน (เซต J)")
     st.caption(
-        f"Service rule: LAV + GAL workload = {_service_total} นาที · "
-        f"สูงสุด {SERVICE_WORKLOAD_LIMIT} นาที/คน · "
-        f"ต้องใช้พนักงาน Service อย่างน้อย {_service_workers_required} คน"
+        "เวลาเริ่มต้นเป็น benchmark จากงานวิจัยและสมมติฐานของโครงงาน; "
+        "สามารถแก้ duration เพื่อใช้ข้อมูลจริงได้ภายหลัง"
     )
-
-
-
-tab_setup, tab_result, tab_gantt, tab_compare, tab_model = st.tabs(
-    [
-        "01 · Input & Model Setup",
-        "02 · Optimization Results",
-        "03 · Gantt & Workforce",
-        "04 · Scenario Analysis",
-        "05 · Mathematical Model",
-    ]
-)
-
-
-# ==================================================================
-# TAB 1 — Setup
-# ==================================================================
-with tab_setup:
-    st.subheader("Input Data — Task Set J")
-    st.markdown(
-        '<div class="section-note">'
-        'ตารางนี้เก็บ Task ID/Zone code สำหรับตัวแบบ แต่เพิ่มชื่อประเภทงานและชื่อ Work Unit จริงเพื่อให้อ่านผลเชิงวิจัยได้ง่ายขึ้น'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
     tasks_df = st.data_editor(
-        st.session_state["tasks_df"],
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        disabled=["ประเภทงานจริง", "Work Unit / Zone จริง"],
+        st.session_state["tasks_df"], num_rows="fixed", use_container_width=True, hide_index=True,
+        disabled=["Task ID", "ประเภท", "ประเภทงานจริง", "Zone", "Work Unit / Zone จริง", "ชื่องาน"],
         column_config={
-            "เลือก": st.column_config.CheckboxColumn("ใช้", width="small"),
-            "Task ID": st.column_config.TextColumn(width="small"),
-            "ประเภท": st.column_config.SelectboxColumn(
-                "Kind code",
-                options=list(TASK_KIND_LABEL.keys()),
-                width="small",
-            ),
-            "ประเภทงานจริง": st.column_config.TextColumn("Task type"),
-            "Zone": st.column_config.TextColumn("Zone code", width="small"),
-            "Work Unit / Zone จริง": st.column_config.TextColumn("Work Unit / Zone"),
-            "ชื่องาน": st.column_config.TextColumn("Task name", width="large"),
-            "d_j (นาที)": st.column_config.NumberColumn(
-                "Duration d_j (min)", min_value=1, max_value=120, step=1
-            ),
+            "เลือก": st.column_config.CheckboxColumn("ใช้"),
+            "d_j (นาที)": st.column_config.NumberColumn("เวลา (นาที)", min_value=1, max_value=120),
         },
         key="task_editor",
     )
-    tasks_df = refresh_task_labels(tasks_df, aircraft)
     st.session_state["tasks_df"] = tasks_df
     tasks = df_to_tasks(tasks_df)
 
-    total_work = sum(t.duration for t in tasks)
-    total_worker_count = int(n_workers)
-    lower_bound = -(-total_work // max(1, total_worker_count)) if tasks else 0
+    cleaning_tasks = [t for t in tasks if t.kind != "DEI"]
+    total_clean = sum(t.duration for t in cleaning_tasks)
+    svc_work = service_workload_minutes(tasks)
+    svc_lb = required_service_workers(tasks, int(T), scenario) if cfg["zone_based"] else 0
+    policy_lb = minimum_total_workers_for_policy(tasks, int(T), scenario)
 
-    a1, a2, a3, a4 = st.columns(4)
-    a1.metric("Active tasks", len(tasks))
-    a2.metric("Total workload", f"{total_work} min")
-    a3.metric("Simple lower bound", f"{lower_bound} min")
-    a4.metric("Weather factor γ", f"{WEATHER_FACTOR[weather]:.2f}")
+    a1, a2, a3, a4, a5 = st.columns(5)
+    a1.metric("Tasks", len(tasks))
+    a2.metric("Cleaning workload", f"{total_clean} นาที")
+    a3.metric("LAV+GAL workload", f"{svc_work} นาที")
+    a4.metric("Service LB", f"{svc_lb}" if cfg["zone_based"] else "Flexible")
+    a5.metric("Workforce LB", f"{policy_lb}")
 
-    st.divider()
-    st.subheader("Worker Capability Matrix — aᵢⱼ")
-    st.caption(
-        "✓ = พนักงานสามารถทำงานนั้นได้ · Scenario S2/S4/S5 จะสร้างข้อจำกัดแบบ Zone-based อัตโนมัติ · "
-        f"LAV+GAL จำกัดไม่เกิน {SERVICE_WORKLOAD_LIMIT} นาที/คน"
-    )
-
-    workers, dedicated_deicing_worker = build_scenario_workers(int(n_workers), scenario)
-    skill_key = (
-        f"{signature}|{n_workers}|{zone_based}|dedicated={dedicated_deicing_worker}|service25_v2|"
-        f"{len(tasks)}|{','.join(t.id for t in tasks)}"
-    )
+    workers_now, dedicated_now = build_scenario_workers(int(n_workers), scenario)
+    preview_service = svc_lb
+    skill_key = f"{signature}|{n_workers}|T={T}|svcLB={preview_service}|{','.join(t.id for t in tasks)}"
     if st.session_state.get("skill_key") != skill_key:
         st.session_state["skill_key"] = skill_key
         st.session_state["skill_df"] = skill_matrix_df(
-            workers,
-            tasks,
-            zone_based,
-            dedicated_deicing_worker=dedicated_deicing_worker,
+            workers_now, tasks, cfg["zone_based"], dedicated_now, preview_service
         )
 
-    skill_df = st.data_editor(
-        st.session_state["skill_df"],
-        use_container_width=True,
-        hide_index=True,
-        disabled=["พนักงาน"],
-        key="skill_editor",
-    )
-    st.session_state["skill_df"] = skill_df
+    st.subheader("ความสามารถของพนักงาน (aᵢⱼ)")
+    if scenario == "S1":
+        st.caption("S1 Flexible: แก้ capability ได้")
+        skill_df = st.data_editor(
+            st.session_state["skill_df"], use_container_width=True, hide_index=True,
+            disabled=["พนักงาน"], key="skill_editor",
+        )
+        st.session_state["skill_df"] = skill_df
+    else:
+        st.caption(
+            "ตารางนี้เป็น preview ที่ Service-team lower bound; ตอน Run ระบบจะลองขนาด Service team "
+            "ตั้งแต่ Lower Bound ขึ้นไปและเลือกตารางที่ Cmax ต่ำที่สุด"
+        )
+        st.dataframe(st.session_state["skill_df"], use_container_width=True, hide_index=True)
 
-    st.divider()
-    run = st.button(
-        "🚀 Run Optimization",
-        type="primary",
-        use_container_width=True,
+    run_btn = st.button(
+        "🚀 คำนวณตารางงาน" if calc_mode == "schedule" else "🚀 หาจำนวนพนักงานน้อยที่สุด",
+        type="primary", use_container_width=True,
     )
 
-    if run:
+    if run_btn:
         if not tasks:
-            st.error("ยังไม่มีงานในรายการ")
-        else:
-            a = df_to_capability(skill_df, tasks)
-            a = enforce_dedicated_deicing_worker(
-                a,
-                workers,
-                tasks,
-                dedicated_deicing_worker,
-            )
-            a = enforce_service_worker_rule(
-                a,
-                workers,
-                tasks,
-                zone_based=zone_based,
-                dedicated_worker=dedicated_deicing_worker,
-            )
-            data = ProblemData(
-                aircraft=aircraft,
-                workers=workers,
-                tasks=tasks,
-                T=int(T),
-                a=a,
-                P=build_precedence(
-                    tasks,
-                    trash_first_global=trash_first,
-                ),
-                B=build_blocking(tasks) if use_blocking else [],
-                enforce_time_limit=enforce_T,
-                objective_mode=objective_mode,
-                scenario=scenario,
-            )
-
-            with st.spinner("Solving optimization model with OR-Tools CP-SAT..."):
-                result = solve_model(data, max_seconds=max_seconds)
-
-            st.session_state["result"] = result
+            st.error("ไม่มีงานที่เลือก")
+        elif calc_mode == "schedule":
+            a_manual = df_to_capability(st.session_state["skill_df"], tasks) if scenario == "S1" else None
+            data, res, ptable = solve_policy(tasks, int(n_workers), scenario, a_manual, enforce_T)
             st.session_state["data"] = data
-            st.session_state["weather_used"] = weather
-            st.session_state["cleaning_used"] = cleaning_type
+            st.session_state["result"] = res
+            st.session_state["partition_table"] = ptable
+            st.session_state["minw_table"] = None
+        else:
+            start = minimum_total_workers_for_policy(tasks, int(T), scenario)
 
-            if result.feasible:
-                st.success(
-                    f"Feasible solution found — Cmax = {result.cmax} min · "
-                    f"Buffer = {result.buffer} min"
-                )
+            def min_solve(m: int):
+                ts = tasks_for_scenario(tasks, scenario)
+                data, res, _ = solve_policy(ts, m, scenario, enforce=True)
+                return data, res
+
+            best_m, res, table = find_min_workers(
+                min_solve, m_min=start, m_max=30, max_seconds=max_seconds,
+            )
+            st.session_state["result"] = res
+            st.session_state["minw_table"] = table
+            if best_m is not None:
+                data, res2, ptable = solve_policy(tasks_for_scenario(tasks, scenario), best_m, scenario, enforce=True)
+                st.session_state["data"] = data
+                st.session_state["result"] = res2
+                st.session_state["partition_table"] = ptable
             else:
-                st.error(result.message)
+                st.session_state["data"] = None
+                st.session_state["partition_table"] = None
+
+        res = st.session_state.get("result")
+        if res and res.feasible:
+            st.success(f"พบคำตอบ: Cmax = {res.cmax} นาที · Buffer = {res.buffer} นาที")
+        elif res:
+            st.error(res.message)
+        else:
+            st.error("ยังไม่พบคำตอบที่เป็นไปได้")
 
 
 # ==================================================================
-# TAB 2 — Optimization result
+# TAB 02
 # ==================================================================
-with tab_result:
+with result_tab:
     result = st.session_state.get("result")
     data = st.session_state.get("data")
+    minw = st.session_state.get("minw_table")
+    ptable = st.session_state.get("partition_table")
 
-    if result is None:
-        st.info("Run Optimization ในแท็บ 01 ก่อนเพื่อสร้างผลลัพธ์")
+    if minw is not None and len(minw):
+        st.subheader("การค้นหาจำนวนพนักงาน")
+        st.dataframe(minw, use_container_width=True, hide_index=True)
+        feasible_rows = minw[minw["Feasible"]]
+        if len(feasible_rows):
+            proven = bool(feasible_rows.iloc[0].get("Minimum Proven", False))
+            if proven:
+                st.success("จำนวนพนักงานที่พบเป็น Minimum ที่พิสูจน์แล้ว: จำนวนที่ต่ำกว่าถูกพิสูจน์ว่า INFEASIBLE")
+            else:
+                st.warning("พบ workforce ที่ทำได้ แต่ Minimum ยังไม่พิสูจน์ เพราะมีขนาดที่ต่ำกว่าซึ่ง Solver ให้สถานะ UNKNOWN")
+
+    if result is None or data is None:
+        st.info("กดคำนวณในแท็บ 01 ก่อน")
     elif not result.feasible:
         st.error(result.message)
-        st.caption(f"Solver status: {result.status}")
+        st.caption(f"สถานะ: {status_th(result.status)}")
     else:
-        total_work = int(result.schedule["Duration"].sum())
-        avg_util = float(result.workload["Utilization %"].mean()) if not result.workload.empty else 0.0
-        max_util = float(result.workload["Utilization %"].max()) if not result.workload.empty else 0.0
-        time_ratio = (result.cmax / data.T * 100) if data.T else 0.0
+        cleaning_workers = [w for w in data.workers if w != "DEICE_TEAM"]
+        cleaner_load = result.workload[result.workload.Worker.isin(cleaning_workers)]
+        avg_util = float(cleaner_load["Utilization %"].mean()) if len(cleaner_load) else 0.0
 
-        st.subheader("Optimization Performance Summary")
-        k1, k2, k3, k4, k5, k6 = st.columns(6)
-        k1.metric("Cmax", f"{result.cmax} min")
-        k2.metric("Turnaround T", f"{data.T} min")
-        k3.metric("Buffer", f"{result.buffer} min")
-        k4.metric("Total work", f"{total_work} min")
-        k5.metric("Avg. utilization", f"{avg_util:.1f}%")
-        k6.metric("Cmax / T", f"{time_ratio:.1f}%")
-
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("Cmax", f"{result.cmax} นาที")
+        c2.metric("T", f"{data.T} นาที")
+        c3.metric("Buffer", f"{result.buffer} นาที")
+        c4.metric("Cleaning workers", len(cleaning_workers))
+        c5.metric("Service workers", data.service_worker_count if data.service_worker_count is not None else "Flexible")
+        c6.metric("Cleaner avg util.", f"{avg_util:.1f}%")
         st.caption(
-            f"Aircraft {data.aircraft} · Scenario {data.scenario} ({SCENARIOS[data.scenario]}) · "
-            f"Objective {data.objective_mode} · Solver status {result.status} "
-            f"(Gap {result.gap_pct}%) · "
-            f"Solve time {result.solve_time:.2f} s · Max worker utilization {max_util:.1f}%"
+            f"{status_th(result.status)} · Solver gap={result.gap_pct}% · "
+            f"Solve time={result.solve_time:.2f}s · Secondary objective balances Cleaning workers only"
         )
 
-        if result.buffer is not None and result.buffer < 0:
-            st.warning(
-                "ผลลัพธ์ใช้เวลาเกิน Turnaround Time ที่กำหนด — ควรเพิ่ม workforce, "
-                "เพิ่ม T หรือปรับข้อจำกัดของ Scenario"
-            )
-        elif result.buffer == 0:
-            st.warning("ตารางใช้ Turnaround Time เต็มพอดี ไม่มีเวลา Buffer สำหรับความล่าช้า")
-        else:
-            st.success(f"ตารางอยู่ภายในเป้าหมาย และมี operational buffer {result.buffer} นาที")
+        if data.scenario == "S3":
+            st.info("S3 แยก DEICE_TEAM ออกจาก Cleaning workforce; ไม่ใช้ workload ของทีม De-icing ใน objective การ balance Cleaner")
 
-        st.divider()
-        st.subheader("Detailed Optimized Schedule")
-        display_schedule = schedule_display_df(result.schedule, data.aircraft)
-        st.dataframe(
-            display_schedule,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "พนักงาน": st.column_config.TextColumn("Assigned worker", width="medium"),
-                "ชื่องาน": st.column_config.TextColumn("Task name", width="large"),
-                "ประเภทงาน": st.column_config.TextColumn("Task type", width="medium"),
-                "Work Unit / Zone": st.column_config.TextColumn("Work Unit / Zone", width="medium"),
-                "Task ID": st.column_config.TextColumn(width="small"),
-                "เริ่ม (นาที)": st.column_config.NumberColumn(format="%d"),
-                "เสร็จ (นาที)": st.column_config.NumberColumn(format="%d"),
-                "ใช้เวลา (นาที)": st.column_config.NumberColumn(format="%d"),
-            },
-        )
+        if ptable is not None and len(ptable) > 1:
+            st.subheader("การเลือกขนาด Service team")
+            st.dataframe(ptable, use_container_width=True, hide_index=True)
+            st.caption("ระบบลองหลายขนาด Service team แล้วเลือก Cmax ต่ำสุด; ถ้า Cmax เท่ากันเลือก workload Cleaner ที่สมดุลกว่า")
 
-        st.subheader("Worker Workload Summary")
-        display_workload = workload_display_df(result.workload)
-        st.dataframe(
-            display_workload,
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.subheader("ตารางงาน")
+        st.dataframe(schedule_display_df(result.schedule, data.aircraft), use_container_width=True, hide_index=True)
+        st.subheader("ภาระงานรายทรัพยากร")
+        st.dataframe(workload_display_df(result.workload), use_container_width=True, hide_index=True)
 
         summary = pd.DataFrame([{
             "Aircraft": data.aircraft,
-            "Cleaning Type": st.session_state.get("cleaning_used", cleaning_type),
-            "Weather": st.session_state.get("weather_used", weather),
             "Scenario": data.scenario,
-            "Objective": data.objective_mode,
-            "Workers": len(data.workers),
-            "Tasks": len(data.tasks),
+            "Cleaning Workers": len(cleaning_workers),
+            "Deicing Resource": int("DEICE_TEAM" in data.workers),
+            "Service Workers": data.service_worker_count,
             "T": data.T,
             "Cmax": result.cmax,
             "Buffer": result.buffer,
-            "Total Work": total_work,
-            "Average Utilization (%)": round(avg_util, 1),
+            "Follow lag k": data.follow_lag,
+            "Hygiene GAL before LAV": data.hygiene_galley_first,
             "Status": result.status,
-            "Solve Time (s)": round(result.solve_time, 3),
+            "Model Validation": "Mathematical verification only; no field validation",
         }])
-
+        assumptions = pd.DataFrame(MODEL_ASSUMPTIONS, columns=["Item", "Assumption", "Status/Source type"])
+        input_tasks = tasks_to_df(data.tasks, data.aircraft)
+        sheets = {
+            "Summary": summary,
+            "Input Tasks": input_tasks,
+            "Capability": capability_to_df(data),
+            "Schedule": result.schedule,
+            "Workload": result.workload,
+            "Assumptions": assumptions,
+        }
+        if ptable is not None:
+            sheets["Service Team Search"] = ptable
+        if minw is not None:
+            sheets["Workforce Search"] = minw
         st.download_button(
-            "⬇️ Download research results (.xlsx)",
-            data=to_excel_bytes({
-                "Summary": summary,
-                "Schedule": display_schedule,
-                "Schedule_Raw": result.schedule,
-                "Workload": display_workload,
-            }),
-            file_name=f"result_{data.aircraft}_{data.scenario}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "⬇️ ดาวน์โหลดผล Excel", to_excel_bytes(sheets),
+            "optimization_result.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
 
 
 # ==================================================================
-# TAB 3 — Gantt + workforce
+# TAB 03
 # ==================================================================
-with tab_gantt:
+with gantt_tab:
     result = st.session_state.get("result")
     data = st.session_state.get("data")
-
-    if result is None or not result.feasible:
-        st.info("ยังไม่มี feasible solution สำหรับสร้าง Gantt Chart")
+    if result is None or data is None or not result.feasible:
+        st.info("ยังไม่มีตารางงาน")
     else:
-        st.subheader("Optimized Gantt Schedule")
-        st.markdown(
-            '<div class="section-note">'
-            '<b>วิธีอ่าน:</b> แกน Y = พนักงานแต่ละคน · ข้อความในแท่ง = ชื่องานจริง · '
-            'สี = ประเภทงาน · เส้นประ Cmax = เวลาที่งานทั้งหมดเสร็จ · เส้นจุด T = เวลาจอดที่กำหนด'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-        st.plotly_chart(
-            gantt_chart(
-                result.schedule,
-                data.workers,
-                data.T,
-                result.cmax,
-                data.aircraft,
-            ),
-            use_container_width=True,
-            config={"displaylogo": False, "scrollZoom": True},
-        )
-
-        g1, g2 = st.columns([1.6, 1.0])
-        with g1:
-            st.plotly_chart(
-                workload_chart(result.workload),
-                use_container_width=True,
-                config={"displaylogo": False},
-            )
-        with g2:
-            st.markdown("#### Research interpretation")
-            total_work = int(result.schedule["Duration"].sum())
-            theoretical_lb = -(-total_work // max(1, len(data.workers)))
-            gap = result.cmax - theoretical_lb
-            avg_util = float(result.workload["Utilization %"].mean())
-
-            st.metric("Workload lower bound", f"{theoretical_lb} min")
-            st.metric("Cmax gap above lower bound", f"{gap} min")
-            st.metric("Average worker utilization", f"{avg_util:.1f}%")
-            st.caption(
-                "Lower bound นี้คำนวณจาก total workload ÷ workforce เท่านั้น "
-                "จึงยังไม่รวมผลของ precedence, skill restriction และ aisle blocking"
-            )
+        st.plotly_chart(gantt_chart(result.schedule, data.workers, data.T, result.cmax), use_container_width=True)
+        st.plotly_chart(workload_chart(result.workload), use_container_width=True)
 
 
 # ==================================================================
-# TAB 4 — Scenario comparison
+# TAB 04
 # ==================================================================
-with tab_compare:
+with compare_tab:
     st.subheader("Scenario Analysis")
-    st.caption(
-        "เปรียบเทียบผลภายใต้ aircraft, task set, workforce, weather และ turnaround time ชุดเดียวกัน "
-        "โดยเปลี่ยนนโยบาย capability / precedence และใน S5 จะเพิ่มงาน Aircraft De-icing เข้ามาใน Task Set"
-    )
+    st.caption("S1/S2 เป็น Normal/Clear cleaning scenarios; S3 เป็น Winter Extension จึงไม่ควรตีความว่าเป็นคู่แข่งภายใต้สภาพเดียวกัน")
+    include_winter = st.checkbox("รวม S3 Winter De-icing Extension ในกราฟเพื่อดูผลกระทบ", value=False)
+    scenarios_to_compare = ["S1", "S2"] + (["S3"] if include_winter else [])
+    m_range = st.slider("ช่วงจำนวนทรัพยากรรวม", 2, 12, (3, 7))
 
-    picked = st.multiselect(
-        "เลือก Scenario",
-        list(SCENARIOS.keys()),
-        default=list(SCENARIOS.keys()),
-        format_func=lambda s: f"{s} — {SCENARIOS[s]}",
-    )
+    if st.button("▶ เปรียบเทียบ", use_container_width=True):
+        base = df_to_tasks(st.session_state["tasks_df"])
+        rows, mins = [], []
+        for s in scenarios_to_compare:
+            ts = tasks_for_scenario(base, s)
+            start_lb = minimum_total_workers_for_policy(ts, int(T), s)
+            for m in range(max(m_range[0], start_lb), m_range[1] + 1):
+                data_s, res_s, _ = solve_policy(ts, m, s, enforce=False)
+                rows.append({
+                    "Scenario": s,
+                    "Workers": m,
+                    "Cleaning Workers": len([w for w in data_s.workers if w != "DEICE_TEAM"]),
+                    "Deicing Resource": int("DEICE_TEAM" in data_s.workers),
+                    "Service Workers": data_s.service_worker_count,
+                    "Cmax": res_s.cmax if res_s.feasible else None,
+                    "Status": res_s.status,
+                })
 
-    if st.button("▶ Run Scenario Comparison", use_container_width=True):
-        if "S5" in picked and int(n_workers) < 2:
-            st.error(
-                "ไม่สามารถเปรียบเทียบ S5 เมื่อจำนวนพนักงานรวมต่ำกว่า 2 คน "
-                "เพราะ S5 ต้องมี Cleaner อย่างน้อย 1 คน + DEICE1 1 คน"
+            def scenario_min_solve(m: int):
+                d, r, _ = solve_policy(ts, m, s, enforce=True)
+                return d, r
+
+            mb, rb, search = find_min_workers(
+                scenario_min_solve, start_lb, 30, max_seconds,
             )
-            st.stop()
+            proven = False
+            if mb is not None and len(search[search.Feasible]):
+                proven = bool(search[search.Feasible].iloc[0]["Minimum Proven"])
+            mins.append({
+                "Scenario": s,
+                "Smallest Feasible Found": mb,
+                "Minimum Proven": proven,
+                "Cmax": rb.cmax if rb else None,
+            })
+        st.session_state["compare"] = (pd.DataFrame(rows), pd.DataFrame(mins))
 
-        base_tasks = df_to_tasks(st.session_state["tasks_df"])
-
-        def tasks_for_scenario(s: str) -> list[Task]:
-            """
-            ใช้ Task ที่ผู้ใช้แก้ไขไว้เป็นฐาน
-            - S1-S4: ไม่รวมงาน De-icing
-            - S5: เพิ่ม DEI1 ถ้ายังไม่มี
-            """
-            normal_tasks = [t for t in base_tasks if t.kind != "DEI"]
-            if s != "S5":
-                return normal_tasks
-
-            existing_deicing = [t for t in base_tasks if t.kind == "DEI"]
-            if existing_deicing:
-                return normal_tasks + existing_deicing
-
-            default_s5_tasks = build_tasks(
-                aircraft,
-                CLEANING_TYPES[cleaning_type],
-                weather,
-                include_deicing=True,
-            )
-            deicing_tasks = [t for t in default_s5_tasks if t.kind == "DEI"]
-            return normal_tasks + deicing_tasks
-
-        def build_fn(s: str) -> ProblemData:
-            scenario_tasks = tasks_for_scenario(s)
-            cfg = scenario_settings(s)
-            zb = cfg["zone_based"]
-            tf = cfg["trash_first"]
-
-            # จำนวนพนักงาน m คือจำนวนรวมทั้งหมด (S5 รวม DEICE1)
-            scenario_workers, dedicated_worker = build_scenario_workers(int(n_workers), s)
-
-            return ProblemData(
-                aircraft=aircraft,
-                workers=scenario_workers,
-                tasks=scenario_tasks,
-                T=int(T),
-                a=build_capability(
-                    scenario_workers,
-                    scenario_tasks,
-                    zone_based=zb,
-                    dedicated_deicing_worker=dedicated_worker,
-                ),
-                P=build_precedence(
-                    scenario_tasks,
-                    trash_first_global=tf,
-                ),
-                B=build_blocking(scenario_tasks) if use_blocking else [],
-                enforce_time_limit=enforce_T,
-                objective_mode=objective_mode,
-                scenario=s,
-            )
-
-        with st.spinner("Running selected scenarios..."):
-            table = compare_scenarios(
-                build_fn,
-                picked,
-                max_seconds=max_seconds,
-            )
-        st.session_state["compare"] = table
-
-    table = st.session_state.get("compare")
-    if table is not None:
-        st.dataframe(table, use_container_width=True, hide_index=True)
-        ok = table.dropna(subset=["Cmax"])
-        if not ok.empty:
-            st.plotly_chart(
-                scenario_chart(table, int(T)),
-                use_container_width=True,
-                config={"displaylogo": False},
-            )
-
-            best_idx = ok["Cmax"].astype(float).idxmin()
-            best = ok.loc[best_idx]
-            st.success(
-                f"Best Cmax among feasible scenarios: {best['Scenario']} = {int(best['Cmax'])} min"
-            )
+    comp = st.session_state.get("compare")
+    if comp is not None:
+        table, mins = comp
+        if len(table):
+            st.plotly_chart(compare_chart(table, int(T)), use_container_width=True)
+            st.dataframe(table, use_container_width=True, hide_index=True)
+        st.subheader("Workforce search")
+        st.dataframe(mins, use_container_width=True, hide_index=True)
+        if include_winter:
+            st.warning("S3 มี De-icing resource เพิ่มและสมมติฐาน Winter Operation จึงควรตีความเป็นผลกระทบของกรณีพิเศษ ไม่ใช่การจัดอันดับกับ S1/S2")
 
 
 # ==================================================================
-# TAB 5 — Mathematical model
+# TAB 05
 # ==================================================================
-with tab_model:
-    st.subheader("Mathematical Formulation")
+with model_tab:
+    st.subheader("ตัวแบบคณิตศาสตร์")
     st.markdown(r"""
-**Sets**
-
-$I$ = worker set  ·  $J$ = task set  ·  $R$ = work-unit set  ·  $H_j=\{0,1,\dots,T-d_j\}$
-
 **Decision variable**
 
-$$x_{ijt}=\begin{cases}1 & \text{if worker } i \text{ starts task } j \text{ at time } t\\ 0 & \text{otherwise}\end{cases}
-\qquad C_{\max}\in\mathbb{Z}_{\ge 0}$$
+$$x_{ijt}=1$$ เมื่อพนักงาน/ทรัพยากร $i$ เริ่มงาน $j$ ที่เวลา $t$
 
-**Derived expressions**
+**Objective แบบ 2 ระดับ**
 
-$$S_j=\sum_{i\in I}\sum_{t\in H_j} t\,x_{ijt}
-\qquad
-E_j=\sum_{i\in I}\sum_{t\in H_j} (t+d_j)\,x_{ijt}$$
+Primary objective:
+$$\min C_{max}$$
 
-**Objective**
+Secondary objective เมื่อ $C_{max}$ เท่ากัน:
+$$\min L_{max}$$
+โดย $L_{max}$ คือภาระงานสูงสุดของ **Cleaning workers** เท่านั้น; ไม่รวม DEICE_TEAM
 
-$$\min\; C_{\max}$$
+ใน CP-SAT ใช้น้ำหนักที่ทำให้การลด $C_{max}$ 1 นาทีสำคัญกว่าความแตกต่างของ workload ทุกกรณี
 
-**Constraints**
+**Main constraints**
 
-1. Each task is assigned exactly once  
-   $\displaystyle\sum_{i\in I}\sum_{t\in H_j}x_{ijt}=1\quad\forall j\in J$
+1. ทุกงานถูกทำหนึ่งครั้ง
+$$\sum_i\sum_t x_{ijt}=1$$
 
-2. Worker capability  
-   $x_{ijt}\le a_{ij}\quad\forall i,j,t$
+2. ความสามารถพนักงาน
+$$x_{ijt}\le a_{ij}$$
 
-3. A worker cannot perform overlapping tasks  
-   $\displaystyle\sum_{j\in J}\sum_{t\in H_j:\,t\le\tau<t+d_j}x_{ijt}\le 1$
+3. พนักงานหนึ่งคนทำงานซ้อนไม่ได้
 
-4. Precedence relationship  
-   $\displaystyle E_j\le S_k\quad\forall (j,k)\in P$
+4. งานต่อเนื่องใน Cabin Zone ใช้ follow lag
+$$S_k \ge S_j+k,\qquad E_k\ge E_j+k$$
+ค่าเริ่มต้น $k=1$ นาที เป็นสมมติฐานแทนการทำงานไล่ตามกันภายใน Work Unit
 
-5. Makespan linkage  
-   $\displaystyle C_{\max}\ge E_j\quad\forall j$
+5. งานข้ามพื้นที่ที่มีลำดับก่อนหลังใช้ Finish-to-Start
+$$E_j\le S_k$$
 
-6. Turnaround-time limit  
-   $C_{\max}\le T$
+6. Makespan / time limit
+$$C_{max}\ge E_j,\qquad C_{max}\le T$$
 
-7. Aisle blocking  
-   Tasks in blocking pair set $B$ cannot be active simultaneously.
+7. Hygiene assumption: หากคนเดียวกันทำ Galley และ Lavatory
+$$Worker(B)=Worker(A)\Rightarrow E_B\le S_A$$
 
-8. Variable domains  
-   $x_{ijt}\in\{0,1\}$, $C_{\max}\in\mathbb{Z}_{\ge0}$
+8. S3 Winter Extension
+$$E_j\le S_{DEI1}\quad \forall j\in J_{clean}$$
 """)
 
-    st.divider()
-    st.markdown("#### Research Scope Mapping")
+    st.markdown(r"""
+**Service-team sizing in S2/S3**
+
+คำนวณ Lower Bound ก่อน:
+$$m_{service}^{LB}=\left\lceil\frac{W_{service}}{T_{clean}}\right\rceil$$
+
+แต่ **ไม่ถือว่า Lower Bound คือจำนวนจริง** ระบบจะลอง $m_{service}^{LB},m_{service}^{LB}+1,\ldots$ ภายใต้ workforce ที่มี และเลือก partition ที่ให้ $C_{max}$ ต่ำที่สุด
+""")
+
+    st.subheader("สมมติฐานและสถานะข้อมูล")
     st.dataframe(
-        pd.DataFrame(
-            SCOPE_MAPPING,
-            columns=["ข้อในขอบเขต", "งานย่อย", "รหัสในตัวแบบ"],
-        ),
-        use_container_width=True,
-        hide_index=True,
-        height=330,
+        pd.DataFrame(MODEL_ASSUMPTIONS, columns=["รายการ", "ค่าที่ใช้", "สถานะ"]),
+        use_container_width=True, hide_index=True,
     )
-    st.caption(
-        "Weather factor γ modifies task duration. Airport/operational policies are represented by "
-        "capability parameter aᵢⱼ, precedence set P, blocking set B and Scenario selection. "
-        "Scenario S5 additionally introduces DEI1 (Aircraft De-icing Spray), fixes DEI1 to start at minute 0, and reserves one worker from the total workforce m as the dedicated De-icing worker (DEICE1)."
+    st.warning(
+        "ปัจจุบันถือว่าเป็น Mathematical Verification + Literature-calibrated Assumptions "
+        "ยังไม่ใช่ External/Field Validation เพราะไม่มีข้อมูลการปฏิบัติงานจริง"
     )
-
-    st.divider()
-    tasks_now = df_to_tasks(st.session_state["tasks_df"])
-    lookup = task_lookup(tasks_now)
-
-    cA, cB = st.columns(2)
-    with cA:
-        st.markdown("#### Precedence Set P")
-        P = build_precedence(
-            tasks_now,
-            trash_first_global=trash_first,
-        )
-        p_display = pd.DataFrame([
-            {
-                "งานก่อน": lookup[j].name if j in lookup else j,
-                "งานหลัง": lookup[k].name if k in lookup else k,
-                "Task ID ก่อน": j,
-                "Task ID หลัง": k,
-            }
-            for j, k in P
-        ])
-        st.dataframe(
-            p_display,
-            use_container_width=True,
-            hide_index=True,
-            height=300,
-        )
-
-    with cB:
-        st.markdown("#### Aisle Blocking Set B")
-        B = build_blocking(tasks_now) if use_blocking else []
-        if B:
-            b_display = pd.DataFrame([
-                {
-                    "งาน j": lookup[j].name if j in lookup else j,
-                    "งาน k": lookup[k].name if k in lookup else k,
-                    "Task ID j": j,
-                    "Task ID k": k,
-                }
-                for j, k in B
-            ])
-            st.dataframe(
-                b_display,
-                use_container_width=True,
-                hide_index=True,
-                height=300,
-            )
-        else:
-            st.info("Aisle Blocking constraint is disabled for this run.")
-
-        st.caption(
-            "Blocking pairs are defined across adjacent work units; within-zone order is already controlled by set P."
-        )
