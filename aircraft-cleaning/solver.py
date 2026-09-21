@@ -42,7 +42,7 @@ class ProblemData:
     follow_lag: int = DEFAULT_FOLLOW_LAG
     hygiene_galley_first: bool = True
     enforce_time_limit: bool = True
-    objective_mode: str = "Time + Workload"  # Time + Workload (ใช้งานจริง) | Time Only (ใช้ตรวจสอบ)
+    objective_mode: str = "Time Only"  # Time Only (ใช้งานจริง: min Cmax) | Time + Workload (ทางเลือก)
     scenario: str = "S1"
     # Secondary workload balancing can exclude special resources such as DEICE_TEAM.
     balance_workers: List[str] | None = None
