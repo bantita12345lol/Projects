@@ -176,7 +176,8 @@ def short_label(task_id: str, kind: str, zone: str) -> str:
     return f"{base} {zone}" if zone.startswith("Z") else base
 
 
-def gantt_chart(schedule: pd.DataFrame, workers: list[str], T: int, cmax: int) -> go.Figure:
+def gantt_chart(schedule: pd.DataFrame, workers: list[str], T: int, cmax: int,
+                full_range: bool = True) -> go.Figure:
     fig = go.Figure()
     plot = schedule.copy()
     plot["WorkerDisplay"] = plot.Worker.map(worker_name)
@@ -203,8 +204,10 @@ def gantt_chart(schedule: pd.DataFrame, workers: list[str], T: int, cmax: int) -
                       annotation_text=f"เวลาจอด {T} นาที", annotation_position="top right")
     fig.update_layout(
         barmode="overlay", height=max(380, 64 * len(workers) + 150),
-        xaxis=dict(title="เวลานับจากเริ่มทำความสะอาด (นาที)", dtick=1 if max(T, cmax) <= 40 else 5,
-                   range=[0, max(T, cmax) + 1], showgrid=True, gridcolor="#EEF2F7"),
+        xaxis=dict(title="เวลานับจากเริ่มทำความสะอาด (นาที)",
+                   dtick=1 if (max(T, cmax) if full_range else cmax) <= 40 else 5,
+                   range=[0, (max(T, cmax) if full_range else cmax) + 1],
+                   showgrid=True, gridcolor="#EEF2F7"),
         yaxis=dict(title="", categoryorder="array", categoryarray=order),
         uniformtext=dict(minsize=9, mode="hide"),
         legend=dict(title="ประเภทงาน", orientation="h", y=-0.18, itemclick=False, itemdoubleclick=False),
@@ -372,7 +375,7 @@ def build_problem(tasks: list[Task], m_total: int, s: str,
         follow_lag=int(follow_lag),
         hygiene_galley_first=use_hygiene,
         enforce_time_limit=enforce,
-        objective_mode="Time + Workload",
+        objective_mode="Time Only",
         scenario=s,
         balance_workers=balance_workers,
         service_worker_count=service_count if c["zone_based"] else None,
@@ -476,7 +479,7 @@ with setup:
             "ประเภทงานจริง": st.column_config.TextColumn("ประเภทงาน"),
             "Zone": None,
             "Work Unit / Zone จริง": st.column_config.TextColumn("พื้นที่"),
-            "ชื่องาน": st.column_config.TextColumn("ชื่องาน", width="large"),
+            "ชื่องาน": None,
             "d_j (นาที)": st.column_config.NumberColumn("เวลา (นาที)", min_value=1, max_value=120),
         },
         key="task_editor",
@@ -601,12 +604,14 @@ with result_tab:
         cleaner_load = result.workload[result.workload.Worker.isin(cleaning_workers)]
         avg_util = float(cleaner_load["Utilization %"].mean()) if len(cleaner_load) else 0.0
 
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("เวลาเสร็จ (Cmax)", f"{result.cmax} นาที")
         c2.metric("เวลาเผื่อ (Buffer)", f"{result.buffer} นาที")
+        c6.metric("เวลางานรวม (Workload)", f"{int(result.schedule['Duration'].sum())} นาที")
         c3.metric("พนักงานทำความสะอาด", f"{len(cleaning_workers)} คน")
         c4.metric("พนักงานห้องน้ำ/ครัว", f"{data.service_worker_count} คน" if data.service_worker_count is not None else "ทุกคนช่วยกัน")
         c5.metric("อัตราการใช้งานเฉลี่ย", f"{avg_util:.1f}%")
+
         if result.status != "OPTIMAL":
             st.warning("ตารางนี้ใช้ได้ แต่คำนวณไม่ทันพิสูจน์ว่าเร็วที่สุด ลองเพิ่มเวลาคำนวณในตั้งค่าขั้นสูง")
         if result.cmax > data.T:
@@ -668,7 +673,10 @@ with gantt_tab:
         st.info("ยังไม่มีตารางงาน กดคำนวณในแท็บ 01 ก่อน")
     else:
         st.caption("แต่ละแถว = พนักงาน 1 คน · แท่ง = งาน (สีตามประเภทงาน) · เส้นประ = เวลาที่ทุกงานเสร็จ · เส้นจุดสีส้ม = เวลาจอด · ช่องว่าง = เวลาว่าง")
-        st.plotly_chart(gantt_chart(result.schedule, data.workers, data.T, result.cmax), width="stretch")
+        view = st.radio("ช่วงเวลาที่แสดง", ["แสดงถึงเวลาจอด", "แสดงเฉพาะช่วงที่มีงาน"],
+                        horizontal=True, label_visibility="collapsed")
+        st.plotly_chart(gantt_chart(result.schedule, data.workers, data.T, result.cmax,
+                                    full_range=(view == "แสดงถึงเวลาจอด")), width="stretch")
         st.plotly_chart(workload_chart(result.workload), width="stretch")
 
 
@@ -735,6 +743,12 @@ with compare_tab:
         mv["Scenario"] = mv["Scenario"].map(lambda k: f"{k} — {SCENARIOS[k]}")
         st.dataframe(mv.rename(columns={"Min Workers": "พนักงานน้อยที่สุด", "Cmax": "เวลาเสร็จ"}),
                      width="stretch", hide_index=True)
+        dl = {"Cmax by workforce": table.rename(columns={"Workers": "Workers", "Cmax": "Cmax (min)"}),
+              "Minimum workforce": mins.rename(columns={"Min Workers": "Min Workers", "Cmax": "Cmax (min)"})}
+        st.download_button("⬇️ ดาวน์โหลดผลเปรียบเทียบ (.xlsx)", to_excel_bytes(dl),
+                           file_name=f"scenario_comparison_{aircraft}_T{int(T_used)}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           width="stretch")
         if include_winter:
             st.caption("S3 มีพนักงาน De-icing และเวลา De-icing รวมอยู่ด้วย จึงใช้ดูผลกระทบของกรณีฤดูหนาว ไม่ได้จัดอันดับแข่งกับ S1/S2")
 
