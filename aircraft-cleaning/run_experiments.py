@@ -74,7 +74,7 @@ def build_tasks_for_case(aircraft, scenario, cleaning=DEFAULT_CLEANING_TYPE,
 
 
 def make_problem_from_tasks(aircraft, tasks, n_workers, T, scenario="S1",
-                            enforce_T=True, objective="Time + Workload",
+                            enforce_T=True, objective="Time Only",
                             follow_lag=DEFAULT_FOLLOW_LAG, hygiene=True,
                             service_count: int | None = None):
     cfg = scenario_settings(scenario)
@@ -105,7 +105,7 @@ def make_problem_from_tasks(aircraft, tasks, n_workers, T, scenario="S1",
 
 
 def solve_policy(aircraft, n_workers, T, scenario="S1", enforce_T=True,
-                 objective="Time + Workload", follow_lag=DEFAULT_FOLLOW_LAG,
+                 objective="Time Only", follow_lag=DEFAULT_FOLLOW_LAG,
                  hygiene=True, cleaning=DEFAULT_CLEANING_TYPE,
                  factor=DEFAULT_DURATION_FACTOR, extra_kinds=()):
     tasks = build_tasks_for_case(aircraft, scenario, cleaning, factor, extra_kinds)
